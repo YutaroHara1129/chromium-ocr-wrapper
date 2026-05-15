@@ -1,7 +1,7 @@
 {
   "name": "chromium-ocr-wrapper",
   "version": "0.1.0",
-  "description": "CLI tool that converts PDFs to searchable PDFs using Chrome's built-in print-to-pdf",
+  "description": "CLI tool that converts image-only PDFs to searchable PDFs using Chrome's built-in OCR (PDFSearchify/Screen AI)",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -37,7 +37,7 @@
     "searchable-pdf",
     "cli"
   ],
-  "license": "MIT",
+  "license": "Apache-2.0",
   "dependencies": {
     "commander": "^13.1.0",
     "glob": "^11.0.1",
