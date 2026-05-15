@@ -1,17 +1,21 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+vi.mock("./core/chrome-searchify-printer.js", () => ({
+  ChromeSearchifyPrinter: vi.fn().mockImplementation(() => ({
+    searchify: vi.fn().mockResolvedValue(new Uint8Array([1, 2, 3])),
+    close: vi.fn().mockResolvedValue(undefined),
+  })),
+}));
+
 vi.mock("./core/pipeline.js", () => ({
   ConversionPipeline: vi.fn().mockImplementation(() => ({
     convert: vi.fn().mockResolvedValue({
       inputPath: "/test.pdf",
       outputPath: "/test_searchable.pdf",
       pageCount: 1,
+      textSize: 12059,
     }),
   })),
-}));
-
-vi.mock("./core/chrome-pdf-printer.js", () => ({
-  ChromePdfPrinter: vi.fn().mockImplementation(() => ({})),
 }));
 
 vi.mock("./utils/pdf-info.js", () => ({

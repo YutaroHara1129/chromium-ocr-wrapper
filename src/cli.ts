@@ -2,7 +2,7 @@ import { Command } from "commander";
 import { glob } from "glob";
 import { resolve, basename, extname, join } from "node:path";
 import { statSync } from "node:fs";
-import { ChromePdfPrinter } from "./core/chrome-pdf-printer.js";
+import { ChromeSearchifyPrinter } from "./core/chrome-searchify-printer.js";
 import { PdfInfoExtractor } from "./utils/pdf-info.js";
 import { ConversionPipeline } from "./core/pipeline.js";
 import { NodeFileWriter } from "./utils/file-writer.js";
@@ -15,7 +15,7 @@ export async function runCli(argv: string[]): Promise<void> {
   program
     .name("chromium-ocr")
     .description(
-      "Convert image-only PDFs to searchable PDFs using Chrome's built-in OCR",
+      "Convert image-only PDFs to searchable PDFs using Chrome's built-in OCR (PDFSearchify)",
     )
     .version("0.1.0")
     .argument("<input>", "Input PDF file path or glob pattern")
@@ -31,11 +31,11 @@ export async function runCli(argv: string[]): Promise<void> {
         process.exit(1);
       }
 
-      const chromePdfPrinter = new ChromePdfPrinter();
+      const searchifyPrinter = new ChromeSearchifyPrinter();
       const pdfInfoExtractor = new PdfInfoExtractor();
       const fileWriter = new NodeFileWriter();
       const pipeline = new ConversionPipeline(
-        chromePdfPrinter,
+        searchifyPrinter,
         pdfInfoExtractor,
         fileWriter,
       );
@@ -56,13 +56,15 @@ export async function runCli(argv: string[]): Promise<void> {
         try {
           const result = await pipeline.convert(conversionOptions);
           console.log(
-            `Done: ${result.inputPath} -> ${result.outputPath} (${result.pageCount} pages)`,
+            `Done: ${result.inputPath} -> ${result.outputPath} (${result.pageCount} pages, ${result.textSize} bytes)`,
           );
         } catch (error: unknown) {
           const message =
             error instanceof Error ? error.message : String(error);
           console.error(`Failed: ${file}: ${message}`);
           process.exitCode = 1;
+        } finally {
+          await searchifyPrinter.close();
         }
       }
     });

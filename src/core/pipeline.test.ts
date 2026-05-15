@@ -1,50 +1,42 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { ConversionPipeline } from "./pipeline.js";
 import type {
-  IChromePdfPrinter,
+  IChromeSearchifyPrinter,
   IPdfInfoExtractor,
   IFileWriter,
 } from "../types/index.js";
 
-function createMockChromePdfPrinter(): IChromePdfPrinter {
+function createMocks() {
   return {
-    printToPdf: vi.fn().mockResolvedValue(undefined),
-  };
-}
-
-function createMockPdfInfoExtractor(): IPdfInfoExtractor {
-  return {
-    getMetadata: vi.fn().mockResolvedValue({
-      pageCount: 1,
-      pages: [{ width: 595.28, height: 841.89 }],
-    }),
-    readPdfBytes: vi.fn().mockResolvedValue(new Uint8Array([1, 2, 3])),
-  };
-}
-
-function createMockFileWriter(): IFileWriter {
-  return {
-    writeFile: vi.fn().mockResolvedValue(undefined),
-    ensureDir: vi.fn().mockResolvedValue(undefined),
+    searchifyPrinter: {
+      searchify: vi.fn().mockResolvedValue(new Uint8Array([4, 5, 6])),
+      close: vi.fn().mockResolvedValue(undefined),
+    } as unknown as IChromeSearchifyPrinter,
+    pdfInfoExtractor: {
+      getMetadata: vi.fn().mockResolvedValue({
+        pageCount: 1,
+        pages: [{ width: 595.28, height: 841.89 }],
+      }),
+      readPdfBytes: vi.fn().mockResolvedValue(new Uint8Array([1, 2, 3])),
+    } as unknown as IPdfInfoExtractor,
+    fileWriter: {
+      writeFile: vi.fn().mockResolvedValue(undefined),
+      ensureDir: vi.fn().mockResolvedValue(undefined),
+    } as unknown as IFileWriter,
   };
 }
 
 describe("ConversionPipeline", () => {
   let pipeline: ConversionPipeline;
-  let mockChromePdfPrinter: IChromePdfPrinter;
-  let mockPdfInfoExtractor: IPdfInfoExtractor;
-  let mockFileWriter: IFileWriter;
+  let mocks: ReturnType<typeof createMocks>;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    mockChromePdfPrinter = createMockChromePdfPrinter();
-    mockPdfInfoExtractor = createMockPdfInfoExtractor();
-    mockFileWriter = createMockFileWriter();
-
+    mocks = createMocks();
     pipeline = new ConversionPipeline(
-      mockChromePdfPrinter,
-      mockPdfInfoExtractor,
-      mockFileWriter,
+      mocks.searchifyPrinter,
+      mocks.pdfInfoExtractor,
+      mocks.fileWriter,
     );
   });
 
@@ -57,19 +49,19 @@ describe("ConversionPipeline", () => {
     expect(result.inputPath).toBe("/input/test.pdf");
     expect(result.outputPath).toBe("/output/test.pdf");
     expect(result.pageCount).toBe(1);
+    expect(result.textSize).toBeGreaterThan(0);
 
-    expect(mockPdfInfoExtractor.readPdfBytes).toHaveBeenCalledWith(
+    expect(mocks.searchifyPrinter.searchify).toHaveBeenCalledWith(
       "/input/test.pdf",
-    );
-    expect(mockChromePdfPrinter.printToPdf).toHaveBeenCalledWith(
-      "/input/test.pdf",
-      "/output/test.pdf",
       { chromePath: undefined, verbose: undefined },
     );
-    expect(mockFileWriter.ensureDir).toHaveBeenCalledWith("/output");
+    expect(mocks.fileWriter.writeFile).toHaveBeenCalledWith(
+      "/output/test.pdf",
+      expect.any(Uint8Array),
+    );
   });
 
-  it("should generate default output path when not specified", async () => {
+  it("should generate default output path with _searchable suffix", async () => {
     const result = await pipeline.convert({
       inputPath: "/input/test.pdf",
     });
@@ -77,28 +69,26 @@ describe("ConversionPipeline", () => {
     expect(result.outputPath).toBe("/input/test_searchable.pdf");
   });
 
-  it("should pass chromePath and verbose options", async () => {
-    await pipeline.convert({
-      inputPath: "/input/test.pdf",
-      outputPath: "/output/test.pdf",
-      chromePath: "/usr/bin/chrome",
-      verbose: true,
-    });
-
-    expect(mockChromePdfPrinter.printToPdf).toHaveBeenCalledWith(
-      "/input/test.pdf",
-      "/output/test.pdf",
-      { chromePath: "/usr/bin/chrome", verbose: true },
-    );
-  });
-
   it("should throw when input file does not exist", async () => {
-    vi.mocked(mockPdfInfoExtractor.readPdfBytes).mockRejectedValue(
+    vi.mocked(mocks.pdfInfoExtractor.readPdfBytes).mockRejectedValue(
       new Error("ENOENT: no such file"),
     );
 
     await expect(
       pipeline.convert({ inputPath: "/nonexistent.pdf" }),
     ).rejects.toThrow("ENOENT");
+  });
+
+  it("should pass chromePath and verbose options to searchifyPrinter", async () => {
+    await pipeline.convert({
+      inputPath: "/input/test.pdf",
+      chromePath: "/usr/bin/chrome",
+      verbose: true,
+    });
+
+    expect(mocks.searchifyPrinter.searchify).toHaveBeenCalledWith(
+      "/input/test.pdf",
+      { chromePath: "/usr/bin/chrome", verbose: true },
+    );
   });
 });

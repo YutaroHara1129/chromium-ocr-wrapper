@@ -12,6 +12,7 @@ export interface ConversionResult {
   inputPath: string;
   outputPath: string;
   pageCount: number;
+  textSize: number;
 }
 
 export interface ConversionOptions {
@@ -22,8 +23,12 @@ export interface ConversionOptions {
   chromePath?: string;
 }
 
-export interface IChromePdfPrinter {
-  printToPdf(inputPath: string, outputPath: string, options?: { chromePath?: string; verbose?: boolean }): Promise<void>;
+export interface IChromeSearchifyPrinter {
+  searchify(
+    inputPath: string,
+    options?: { chromePath?: string; verbose?: boolean },
+  ): Promise<Uint8Array>;
+  close(): Promise<void>;
 }
 
 export interface IPdfInfoExtractor {

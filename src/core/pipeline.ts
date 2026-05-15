@@ -1,6 +1,6 @@
 import { dirname, join, extname, basename } from "node:path";
 import type {
-  IChromePdfPrinter,
+  IChromeSearchifyPrinter,
   IPdfInfoExtractor,
   IFileWriter,
   IConversionPipeline,
@@ -10,7 +10,7 @@ import type {
 
 export class ConversionPipeline implements IConversionPipeline {
   constructor(
-    private readonly chromePdfPrinter: IChromePdfPrinter,
+    private readonly searchifyPrinter: IChromeSearchifyPrinter,
     private readonly pdfInfoExtractor: IPdfInfoExtractor,
     private readonly fileWriter: IFileWriter,
   ) {}
@@ -24,20 +24,22 @@ export class ConversionPipeline implements IConversionPipeline {
     );
     const metadata = await this.pdfInfoExtractor.getMetadata(pdfBytes);
 
-    await this.fileWriter.ensureDir(dirname(outputPath));
-    await this.chromePdfPrinter.printToPdf(
+    const searchifiedBytes = await this.searchifyPrinter.searchify(
       options.inputPath,
-      outputPath,
       {
         chromePath: options.chromePath,
         verbose: options.verbose,
       },
     );
 
+    await this.fileWriter.ensureDir(dirname(outputPath));
+    await this.fileWriter.writeFile(outputPath, searchifiedBytes);
+
     return {
       inputPath: options.inputPath,
       outputPath,
       pageCount: metadata.pageCount,
+      textSize: searchifiedBytes.length,
     };
   }
 

@@ -1,46 +1,47 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { PDFDocument } from "pdf-lib";
-import { resolve, join } from "node:path";
-import { mkdtemp, rm, stat, readFile } from "node:fs/promises";
+import { PDFDocument, StandardFonts } from "pdf-lib";
+import { join } from "node:path";
+import { mkdtemp, rm, stat, readFile, writeFile, cp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { ConversionPipeline } from "../src/core/pipeline.js";
-import { ChromePdfPrinter } from "../src/core/chrome-pdf-printer.js";
+import { ChromeSearchifyPrinter } from "../src/core/chrome-searchify-printer.js";
 import { PdfInfoExtractor } from "../src/utils/pdf-info.js";
 import { NodeFileWriter } from "../src/utils/file-writer.js";
 
 const CHROME_PATH =
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
-describe("E2E: ConversionPipeline", () => {
+describe("E2E: Chrome PDFSearchify Pipeline", () => {
   let tempDir: string;
-  let pipeline: ConversionPipeline;
 
   beforeAll(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "ocr-e2e-"));
-    pipeline = new ConversionPipeline(
-      new ChromePdfPrinter(),
-      new PdfInfoExtractor(),
-      new NodeFileWriter(),
-    );
-  });
+  }, 10_000);
 
   afterAll(async () => {
-    await rm(tempDir, { recursive: true, force: true });
+    await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
   });
 
-  async function createTestPdf(
-    name: string,
-    text?: string,
-  ): Promise<string> {
+  async function createImagePdf(name: string, text: string): Promise<string> {
+    const { createCanvas } = await import("canvas");
+    const canvas = createCanvas(595, 842);
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "white";
+    ctx.fillRect(0, 0, 595, 842);
+    ctx.fillStyle = "black";
+    ctx.font = "24px sans-serif";
+    ctx.fillText(text, 72, 200);
+
+    const pngBuffer = canvas.toBuffer("image/png");
     const doc = await PDFDocument.create();
     const page = doc.addPage([595.28, 841.89]);
-
-    if (text) {
-      const font = await doc.embedFont(
-        (await import("pdf-lib")).StandardFonts.Helvetica,
-      );
-      page.drawText(text, { x: 72, y: 720, size: 12, font });
-    }
+    const pngImage = await doc.embedPng(pngBuffer);
+    page.drawImage(pngImage, {
+      x: 0,
+      y: 0,
+      width: 595.28,
+      height: 841.89,
+    });
 
     const pdfBytes = await doc.save();
     const filePath = join(tempDir, name);
@@ -48,92 +49,116 @@ describe("E2E: ConversionPipeline", () => {
     return filePath;
   }
 
-  async function writeFile(path: string, data: Uint8Array): Promise<void> {
-    const { writeFile: wf } = await import("node:fs/promises");
-    await wf(path, data);
+  async function createTextPdf(name: string, text: string): Promise<string> {
+    const doc = await PDFDocument.create();
+    const page = doc.addPage([595.28, 841.89]);
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    page.drawText(text, { x: 72, y: 720, size: 12, font });
+    const pdfBytes = await doc.save();
+    const filePath = join(tempDir, name);
+    await writeFile(filePath, pdfBytes);
+    return filePath;
   }
 
-  it("should convert a text PDF and produce a valid output PDF", async () => {
-    const inputPath = await createTestPdf("text-input.pdf", "Hello OCR Test");
-    const outputPath = join(tempDir, "text-output.pdf");
+  it(
+    "should convert image-only PDF to searchable PDF with OCR text",
+    async () => {
+      const inputPath = await createImagePdf(
+        "ocr-input.pdf",
+        "Hello OCR Test",
+      );
+      const outputPath = join(tempDir, "ocr-output.pdf");
 
-    const result = await pipeline.convert({
-      inputPath,
-      outputPath,
-      chromePath: CHROME_PATH,
-    });
+      const printer = new ChromeSearchifyPrinter();
+      const pipeline = new ConversionPipeline(
+        printer,
+        new PdfInfoExtractor(),
+        new NodeFileWriter(),
+      );
 
-    expect(result.inputPath).toBe(inputPath);
-    expect(result.outputPath).toBe(outputPath);
-    expect(result.pageCount).toBe(1);
+      try {
+        const result = await pipeline.convert({
+          inputPath,
+          outputPath,
+          chromePath: CHROME_PATH,
+        });
 
-    const outputStat = await stat(outputPath);
-    expect(outputStat.size).toBeGreaterThan(0);
+        expect(result.inputPath).toBe(inputPath);
+        expect(result.outputPath).toBe(outputPath);
+        expect(result.pageCount).toBe(1);
+        expect(result.textSize).toBeGreaterThan(0);
 
-    const outputBytes = await readFile(outputPath);
-    const outputDoc = await PDFDocument.load(outputBytes);
-    expect(outputDoc.getPageCount()).toBe(1);
-  });
+        const outputBytes = await readFile(outputPath);
+        const outputDoc = await PDFDocument.load(outputBytes);
+        expect(outputDoc.getPageCount()).toBe(1);
 
-  it("should convert a PDF without text and produce a valid output PDF", async () => {
-    const inputPath = await createTestPdf("empty-input.pdf");
-    const outputPath = join(tempDir, "empty-output.pdf");
+        const pdfText = outputBytes.toString("latin1");
+        expect(pdfText).toContain("0048");
+      } finally {
+        await printer.close();
+      }
+    },
+    60_000,
+  );
 
-    const result = await pipeline.convert({
-      inputPath,
-      outputPath,
-      chromePath: CHROME_PATH,
-    });
+  it(
+    "should handle PDF that already has text",
+    async () => {
+      const inputPath = await createTextPdf("text-input.pdf", "Existing Text");
+      const outputPath = join(tempDir, "text-output.pdf");
 
-    expect(result.pageCount).toBe(1);
+      const printer = new ChromeSearchifyPrinter();
+      const pipeline = new ConversionPipeline(
+        printer,
+        new PdfInfoExtractor(),
+        new NodeFileWriter(),
+      );
 
-    const outputBytes = await readFile(outputPath);
-    const outputDoc = await PDFDocument.load(outputBytes);
-    expect(outputDoc.getPageCount()).toBe(1);
-  });
+      try {
+        const result = await pipeline.convert({
+          inputPath,
+          outputPath,
+          chromePath: CHROME_PATH,
+        });
 
-  it("should generate default output path with _searchable suffix", async () => {
-    const inputPath = await createTestPdf("default-path.pdf", "Test");
+        expect(result.pageCount).toBe(1);
+        expect(result.textSize).toBeGreaterThan(0);
+      } finally {
+        await printer.close();
+      }
+    },
+    60_000,
+  );
 
-    const result = await pipeline.convert({
-      inputPath,
-      chromePath: CHROME_PATH,
-    });
+  it(
+    "should generate default output path with _searchable suffix",
+    async () => {
+      const inputPath = await createImagePdf(
+        "default-path.pdf",
+        "Test Default",
+      );
 
-    expect(result.outputPath).toContain("_searchable.pdf");
+      const printer = new ChromeSearchifyPrinter();
+      const pipeline = new ConversionPipeline(
+        printer,
+        new PdfInfoExtractor(),
+        new NodeFileWriter(),
+      );
 
-    const outputStat = await stat(result.outputPath);
-    expect(outputStat.size).toBeGreaterThan(0);
-  });
+      try {
+        const result = await pipeline.convert({
+          inputPath,
+          chromePath: CHROME_PATH,
+        });
 
-  it("should handle multi-page input PDF (outputs first page)", async () => {
-    const doc = await PDFDocument.create();
-    const font = await doc.embedFont(
-      (await import("pdf-lib")).StandardFonts.Helvetica,
-    );
-    const page1 = doc.addPage([595.28, 841.89]);
-    page1.drawText("Page 1", { x: 72, y: 720, size: 12, font });
-    const page2 = doc.addPage([595.28, 841.89]);
-    page2.drawText("Page 2", { x: 72, y: 720, size: 12, font });
+        expect(result.outputPath).toContain("_searchable.pdf");
 
-    const pdfBytes = await doc.save();
-    const inputPath = join(tempDir, "multi-input.pdf");
-    await writeFile(inputPath, pdfBytes);
-    const outputPath = join(tempDir, "multi-output.pdf");
-
-    const result = await pipeline.convert({
-      inputPath,
-      outputPath,
-      chromePath: CHROME_PATH,
-    });
-
-    expect(result.pageCount).toBe(2);
-
-    const outputStat = await stat(outputPath);
-    expect(outputStat.size).toBeGreaterThan(0);
-
-    const outputBytes = await readFile(outputPath);
-    const outputDoc = await PDFDocument.load(outputBytes);
-    expect(outputDoc.getPageCount()).toBeGreaterThanOrEqual(1);
-  });
+        const outputStat = await stat(result.outputPath);
+        expect(outputStat.size).toBeGreaterThan(0);
+      } finally {
+        await printer.close();
+      }
+    },
+    60_000,
+  );
 });
