@@ -1,10 +1,10 @@
 import { chromium } from "playwright-core";
 import { spawn, type ChildProcess } from "node:child_process";
-import { cp, mkdtemp, rm, stat } from "node:fs/promises";
+import { cp, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
-import type { Browser, Frame } from "playwright-core";
+import type { Browser, Frame, Page } from "playwright-core";
 import type { IChromeSearchifyPrinter } from "../types/index.js";
 
 const DEFAULT_CHROME_PATHS: Record<string, string[]> = {
@@ -64,112 +64,131 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
       { stdio: ["ignore", "pipe", "pipe"], detached: false },
     );
 
-    await this.waitForCdp(this.cdpPort);
+    let spawnError: Error | null = null;
+    this.chromeProcess.on("error", (err: Error) => {
+      spawnError = err;
+    });
 
-    this.browser = await chromium.connectOverCDP(
-      `http://127.0.0.1:${this.cdpPort}`,
-    );
+    let page: Page | null = null;
 
-    const contexts = this.browser.contexts();
-    const context = contexts[0]!;
-    const page = await context.newPage();
+    try {
+      await this.waitForCdp(this.cdpPort);
 
-    const fileUrl = pathToFileURL(inputPath).href;
-    await page.goto(fileUrl, { waitUntil: "load", timeout: 15_000 });
-    await page.waitForTimeout(3000);
+      if (spawnError) {
+        throw spawnError;
+      }
 
-    const frames = page.frames();
-    if (options?.verbose) {
-      console.error(
-        `[ChromeSearchifyPrinter] Found ${frames.length} frames`,
+      this.browser = await chromium.connectOverCDP(
+        `http://127.0.0.1:${this.cdpPort}`,
       );
-    }
 
-    const viewerFrame = frames[1];
-    if (!viewerFrame) {
-      throw new Error("PDF viewer frame not found");
-    }
+      const contexts = this.browser.contexts();
+      const context = contexts[0]!;
+      page = await context.newPage();
 
-    const searchifyReady = await this.waitForSearchify(
-      viewerFrame,
-      options?.verbose,
-    );
+      const fileUrl = pathToFileURL(inputPath).href;
+      await page.goto(fileUrl, { waitUntil: "load", timeout: 15_000 });
+      await page.waitForTimeout(3000);
 
-    if (!searchifyReady && options?.verbose) {
-      console.error(
-        "[ChromeSearchifyPrinter] OCR not detected, attempting save anyway",
+      const frames = page.frames();
+      if (options?.verbose) {
+        console.error(
+          `[ChromeSearchifyPrinter] Found ${frames.length} frames`,
+        );
+      }
+
+      const viewerFrame = frames[1];
+      if (!viewerFrame) {
+        throw new Error("PDF viewer frame not found");
+      }
+
+      const searchifyReady = await this.waitForSearchify(
+        viewerFrame,
+        options?.verbose,
       );
-    }
 
-    const saveResult = await viewerFrame.evaluate(
-      async (searchifyOk: boolean): Promise<{ dataToSave: number[]; fileName: string } | null> => {
-        const viewer = (globalThis as Record<string, unknown>)["viewer"];
-        if (!viewer || typeof viewer !== "object") return null;
+      if (!searchifyReady && options?.verbose) {
+        console.error(
+          "[ChromeSearchifyPrinter] OCR not detected, attempting save anyway",
+        );
+      }
 
-        const ctrl = (viewer as Record<string, unknown>)["currentController"];
-        if (!ctrl || typeof ctrl !== "object") return null;
+      const saveResult = await viewerFrame.evaluate(
+        async (searchifyOk: boolean): Promise<{ dataToSave: number[]; fileName: string } | null> => {
+          const viewer = (globalThis as Record<string, unknown>)["viewer"];
+          if (!viewer || typeof viewer !== "object") return null;
 
-        const ctrlObj = ctrl as Record<string, unknown>;
-        const origHandle = (ctrlObj["handlePluginMessage_"] as Function).bind(ctrl);
-        ctrlObj["handlePluginMessage_"] = function (msg: unknown) {
-          return (origHandle as Function)(msg);
-        };
+          const ctrl = (viewer as Record<string, unknown>)["currentController"];
+          if (!ctrl || typeof ctrl !== "object") return null;
 
-        try {
-          const saveType = searchifyOk ? "SEARCHIFIED" : "ORIGINAL";
-          const result = await Promise.race([
-            (ctrlObj["save"] as Function).call(ctrl, saveType),
-            new Promise<null>((resolve) =>
-              setTimeout(() => resolve(null), 15_000),
-            ),
-          ]);
+          const ctrlObj = ctrl as Record<string, unknown>;
+          const origHandle = (ctrlObj["handlePluginMessage_"] as Function).bind(ctrl);
+          ctrlObj["handlePluginMessage_"] = function (msg: unknown) {
+            return (origHandle as Function)(msg);
+          };
 
-          if (result && (result as Record<string, unknown>)["dataToSave"]) {
-            const r = result as { dataToSave: ArrayBuffer; fileName: string };
-            return {
-              dataToSave: Array.from(new Uint8Array(r.dataToSave)),
-              fileName: r.fileName,
-            };
-          }
-
-          if (saveType === "SEARCHIFIED") {
-            const originalResult = await Promise.race([
-              (ctrlObj["save"] as Function).call(ctrl, "ORIGINAL"),
+          try {
+            const saveType = searchifyOk ? "SEARCHIFIED" : "ORIGINAL";
+            const result = await Promise.race([
+              (ctrlObj["save"] as Function).call(ctrl, saveType),
               new Promise<null>((resolve) =>
                 setTimeout(() => resolve(null), 15_000),
               ),
             ]);
-            if (originalResult && (originalResult as Record<string, unknown>)["dataToSave"]) {
-              const or = originalResult as { dataToSave: ArrayBuffer; fileName: string };
+
+            if (result && (result as Record<string, unknown>)["dataToSave"]) {
+              const r = result as { dataToSave: ArrayBuffer; fileName: string };
               return {
-                dataToSave: Array.from(new Uint8Array(or.dataToSave)),
-                fileName: or.fileName,
+                dataToSave: Array.from(new Uint8Array(r.dataToSave)),
+                fileName: r.fileName,
               };
             }
+
+            if (saveType === "SEARCHIFIED") {
+              const originalResult = await Promise.race([
+                (ctrlObj["save"] as Function).call(ctrl, "ORIGINAL"),
+                new Promise<null>((resolve) =>
+                  setTimeout(() => resolve(null), 15_000),
+                ),
+              ]);
+              if (originalResult && (originalResult as Record<string, unknown>)["dataToSave"]) {
+                const or = originalResult as { dataToSave: ArrayBuffer; fileName: string };
+                return {
+                  dataToSave: Array.from(new Uint8Array(or.dataToSave)),
+                  fileName: or.fileName,
+                };
+              }
+            }
+          } catch {
+            // save failed
           }
-        } catch {
-          // save failed
-        }
 
-        return null;
-      },
-      searchifyReady,
-    );
-
-    await page.close();
-
-    if (saveResult && saveResult.dataToSave.length > 0) {
-      return new Uint8Array(saveResult.dataToSave);
-    }
-
-    if (options?.verbose) {
-      console.error(
-        "[ChromeSearchifyPrinter] Save returned no data, returning original PDF",
+          return null;
+        },
+        searchifyReady,
       );
+
+      await page.close();
+      page = null;
+
+      if (saveResult && saveResult.dataToSave.length > 0) {
+        return new Uint8Array(saveResult.dataToSave);
+      }
+
+      if (options?.verbose) {
+        console.error(
+          "[ChromeSearchifyPrinter] Save returned no data, returning original PDF",
+        );
+      }
+      const originalBytes = await readFile(inputPath);
+      return new Uint8Array(originalBytes);
+    } catch (error) {
+      if (page) {
+        await page.close().catch(() => {});
+      }
+      await this.close();
+      throw error;
     }
-    const { readFile } = await import("node:fs/promises");
-    const originalBytes = await readFile(inputPath);
-    return new Uint8Array(originalBytes);
   }
 
   async close(): Promise<void> {

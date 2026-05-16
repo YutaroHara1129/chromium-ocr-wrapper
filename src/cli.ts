@@ -33,7 +33,8 @@ export async function runCli(argv: string[]): Promise<void> {
 
       if (files.length === 0) {
         console.error("No PDF files found matching the input pattern.");
-        process.exit(1);
+        process.exitCode = 1;
+        return;
       }
 
       const searchifyPrinter = new ChromeSearchifyPrinter();
@@ -52,8 +53,10 @@ export async function runCli(argv: string[]): Promise<void> {
         await searchifyPrinter.close();
       };
 
-      process.once("SIGINT", () => void cleanup());
-      process.once("SIGTERM", () => void cleanup());
+      const onSigint = (): void => void cleanup();
+      const onSigterm = (): void => void cleanup();
+      process.once("SIGINT", onSigint);
+      process.once("SIGTERM", onSigterm);
 
       try {
         for (const file of files) {
@@ -82,6 +85,8 @@ export async function runCli(argv: string[]): Promise<void> {
           }
         }
       } finally {
+        process.removeListener("SIGINT", onSigint);
+        process.removeListener("SIGTERM", onSigterm);
         await cleanup();
       }
     });

@@ -1,4 +1,7 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { beforeEach, describe, expect, it } from "vitest";
 import { NodeFileWriter } from "./file-writer.js";
 
 describe("NodeFileWriter", () => {
@@ -8,34 +11,105 @@ describe("NodeFileWriter", () => {
     writer = new NodeFileWriter();
   });
 
-  it("should write file to disk", async () => {
-    const fs = await import("node:fs/promises");
-    const path = await import("node:path");
-    const os = await import("node:os");
+  async function createTempDir(): Promise<string> {
+    return mkdtemp(join(tmpdir(), "chromium-ocr-file-writer-"));
+  }
 
-    const tmpPath = path.join(os.tmpdir(), `test-file-writer-${Date.now()}.bin`);
-    const data = new Uint8Array([1, 2, 3, 4, 5]);
+  it("writes binary data exactly to file", async () => {
+    const tempDir = await createTempDir();
 
-    await writer.writeFile(tmpPath, data);
+    try {
+      const filePath = join(tempDir, "output.bin");
+      const data = new Uint8Array([0, 1, 2, 3, 127, 128, 254, 255]);
 
-    const read = await fs.readFile(tmpPath);
-    expect(read).toEqual(Buffer.from(data));
+      await writer.writeFile(filePath, data);
 
-    await fs.unlink(tmpPath);
+      const written = await readFile(filePath);
+      expect(written).toEqual(Buffer.from(data));
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
   });
 
-  it("should create directory recursively", async () => {
-    const fs = await import("node:fs/promises");
-    const path = await import("node:path");
-    const os = await import("node:os");
+  it("overwrites existing file content", async () => {
+    const tempDir = await createTempDir();
 
-    const tmpDir = path.join(os.tmpdir(), `test-dir-writer-${Date.now()}`, "nested", "deep");
+    try {
+      const filePath = join(tempDir, "output.bin");
+      await writeFile(filePath, Buffer.from([10, 20, 30, 40, 50]));
 
-    await writer.ensureDir(tmpDir);
+      const replacement = new Uint8Array([1, 2]);
 
-    const stat = await fs.stat(tmpDir);
-    expect(stat.isDirectory()).toBe(true);
+      await writer.writeFile(filePath, replacement);
 
-    await fs.rm(path.dirname(path.dirname(tmpDir)), { recursive: true });
+      const written = await readFile(filePath);
+      expect(written).toEqual(Buffer.from(replacement));
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("creates directory recursively for nested path", async () => {
+    const tempDir = await createTempDir();
+
+    try {
+      const nestedDir = join(tempDir, "one", "two", "three");
+
+      await writer.ensureDir(nestedDir);
+
+      const directoryStat = await stat(nestedDir);
+      expect(directoryStat.isDirectory()).toBe(true);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("is idempotent when ensuring an existing directory", async () => {
+    const tempDir = await createTempDir();
+
+    try {
+      const nestedDir = join(tempDir, "existing");
+      await writer.ensureDir(nestedDir);
+
+      await expect(writer.ensureDir(nestedDir)).resolves.toBeUndefined();
+
+      const directoryStat = await stat(nestedDir);
+      expect(directoryStat.isDirectory()).toBe(true);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("propagates missing parent directory errors from writeFile", async () => {
+    const tempDir = await createTempDir();
+
+    try {
+      const filePath = join(tempDir, "missing-parent", "output.bin");
+
+      await expect(writer.writeFile(filePath, new Uint8Array([1]))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("propagates permission errors from writeFile", async () => {
+    const tempDir = await createTempDir();
+    const readOnlyDir = join(tempDir, "read-only");
+
+    try {
+      await writer.ensureDir(readOnlyDir);
+      await chmod(readOnlyDir, 0o555);
+
+      const filePath = join(readOnlyDir, "output.bin");
+
+      await expect(writer.writeFile(filePath, new Uint8Array([1]))).rejects.toMatchObject({
+        code: expect.stringMatching(/^(EACCES|EPERM)$/),
+      });
+    } finally {
+      await chmod(readOnlyDir, 0o755).catch(() => undefined);
+      await rm(dirname(readOnlyDir), { recursive: true, force: true });
+    }
   });
 });

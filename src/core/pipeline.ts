@@ -20,19 +20,6 @@ export class ConversionPipeline implements IConversionPipeline {
     const outputPath =
       options.outputPath ?? this.generateOutputPath(options.inputPath);
 
-    const pdfBytes = await this.pdfInfoExtractor.readPdfBytes(
-      options.inputPath,
-    );
-    const metadata = await this.pdfInfoExtractor.getMetadata(pdfBytes);
-
-    const searchifiedBytes = await this.searchifyPrinter.searchify(
-      options.inputPath,
-      {
-        chromePath: options.chromePath,
-        verbose: options.verbose,
-      },
-    );
-
     await this.fileWriter.ensureDir(dirname(outputPath));
 
     if (!options.overwrite) {
@@ -45,8 +32,25 @@ export class ConversionPipeline implements IConversionPipeline {
         if (err instanceof Error && err.message.startsWith("Output already")) {
           throw err;
         }
+        const errno = err as NodeJS.ErrnoException | undefined;
+        if (!errno || errno.code !== "ENOENT") {
+          throw err;
+        }
       }
     }
+
+    const pdfBytes = await this.pdfInfoExtractor.readPdfBytes(
+      options.inputPath,
+    );
+    const metadata = await this.pdfInfoExtractor.getMetadata(pdfBytes);
+
+    const searchifiedBytes = await this.searchifyPrinter.searchify(
+      options.inputPath,
+      {
+        chromePath: options.chromePath,
+        verbose: options.verbose,
+      },
+    );
 
     await this.fileWriter.writeFile(outputPath, searchifiedBytes);
 
