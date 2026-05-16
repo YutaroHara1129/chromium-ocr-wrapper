@@ -14,7 +14,8 @@
     }
   },
   "bin": {
-    "chromium-ocr": "./dist/cli.js"
+    "chromium-ocr": "./dist/cli.js",
+    "chromium-ocr-wrapper": "./dist/cli.js"
   },
   "files": [
     "dist"
@@ -28,26 +29,35 @@
     "test:e2e": "vitest run --config vitest.config.e2e.ts",
     "lint": "eslint src/",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "release:check": "npm run lint && npm run typecheck && npm test && npm run build && npm pack --dry-run"
   },
   "keywords": [
     "ocr",
     "pdf",
     "chromium",
+    "chrome",
+    "screen-ai",
     "searchable-pdf",
+    "pdf-ocr",
     "cli"
   ],
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yutarohara/chromium-ocr-wrapper.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "commander": "^13.1.0",
     "glob": "^11.0.1",
     "pdf-lib": "^1.17.1",
-    "playwright": "^1.60.0",
-    "ws": "^8.20.1"
+    "playwright-core": "^1.60.0"
   },
   "devDependencies": {
     "@types/node": "^22.15.0",
-    "@types/ws": "^8.18.1",
     "@typescript-eslint/eslint-plugin": "^8.31.0",
     "@typescript-eslint/parser": "^8.31.0",
     "@vitest/coverage-v8": "^3.1.0",

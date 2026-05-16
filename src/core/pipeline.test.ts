@@ -6,7 +6,15 @@ import type {
   IFileWriter,
 } from "../types/index.js";
 
-function createMocks() {
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    stat: vi.fn().mockRejectedValue(new Error("ENOENT")),
+  };
+});
+
+function createMocks(): { searchifyPrinter: IChromeSearchifyPrinter; pdfInfoExtractor: IPdfInfoExtractor; fileWriter: IFileWriter } {
   return {
     searchifyPrinter: {
       searchify: vi.fn().mockResolvedValue(new Uint8Array([4, 5, 6])),
@@ -90,5 +98,32 @@ describe("ConversionPipeline", () => {
       "/input/test.pdf",
       { chromePath: "/usr/bin/chrome", verbose: true },
     );
+  });
+
+  it("should reject when output exists without --overwrite", async () => {
+    const { stat } = await import("node:fs/promises");
+    vi.mocked(stat).mockResolvedValueOnce({} as never);
+
+    await expect(
+      pipeline.convert({
+        inputPath: "/input/test.pdf",
+        outputPath: "/output/exists.pdf",
+        overwrite: false,
+      }),
+    ).rejects.toThrow("Output already exists");
+  });
+
+  it("should allow writing when output exists and --overwrite is set", async () => {
+    const { stat } = await import("node:fs/promises");
+    vi.mocked(stat).mockResolvedValueOnce({} as never);
+
+    const result = await pipeline.convert({
+      inputPath: "/input/test.pdf",
+      outputPath: "/output/exists.pdf",
+      overwrite: true,
+    });
+
+    expect(result.outputPath).toBe("/output/exists.pdf");
+    expect(mocks.fileWriter.writeFile).toHaveBeenCalled();
   });
 });

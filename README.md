@@ -2,11 +2,14 @@
 
 CLI tool that converts image-only PDFs into searchable PDFs using Chrome's built-in OCR. Google Chrome ships an on-device OCR engine called Screen AI that runs automatically inside the PDF viewer when a scanned document is opened. This project wraps that capability so you can invoke it from the command line or from a Node.js program, without relying on cloud services.
 
+> **Beta software** — This package is in early development (v0.x). The API may change between minor versions. Tested on macOS; Linux and Windows support is experimental.
+
 ## Requirements
 
 - Node.js 20 or later
 - Google Chrome or Chromium installed on the system (Playwright's bundled Chromium does not include the PDF viewer extension)
 - Chrome must have downloaded the Screen AI component at least once (this happens automatically during normal browsing on recent Chrome versions)
+- Chrome 137 or later is required for `PdfSearchifySave`
 
 The tool auto-detects Chrome at the standard installation paths for macOS, Linux, and Windows. If Chrome is installed elsewhere, pass `--chrome-path`.
 
@@ -20,6 +23,12 @@ The package also works without installation via `npx`:
 
 ```sh
 npx chromium-ocr-wrapper input.pdf
+```
+
+After installation the `chromium-ocr` command is also available:
+
+```sh
+chromium-ocr input.pdf
 ```
 
 ## Quick start
@@ -160,3 +169,7 @@ Save returned no data — For PDFs that already contain text, Chrome does not pr
 ## License
 
 Apache-2.0
+
+## Disclaimer
+
+This project is not affiliated with, endorsed by, or sponsored by Google LLC. Chrome and Chromium are trademarks of Google LLC. Users are responsible for ensuring their use of Chrome complies with Google's Terms of Service.

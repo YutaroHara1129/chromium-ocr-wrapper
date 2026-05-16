@@ -14,17 +14,17 @@ vi.mock("node:child_process", () => ({
   spawn: vi.fn(),
 }));
 
-vi.mock("playwright", () => ({
+vi.mock("playwright-core", () => ({
   chromium: {
     connectOverCDP: vi.fn(),
   },
 }));
 
-import { chromium } from "playwright";
+import { chromium } from "playwright-core";
 import { spawn } from "node:child_process";
 import { ChromeSearchifyPrinter } from "./chrome-searchify-printer.js";
 
-function createMockPage(viewerEvaluateResult?: unknown) {
+function createMockPage(viewerEvaluateResult?: unknown): Record<string, unknown> {
   const searchifyEvaluate = vi.fn().mockResolvedValue({
     hasSearchifyText: true,
     pdfSearchifySaveEnabled: true,
@@ -51,7 +51,7 @@ function createMockPage(viewerEvaluateResult?: unknown) {
   };
 }
 
-function createMockBrowser() {
+function createMockBrowser(): Record<string, unknown> {
   const mockPage = createMockPage();
   return {
     contexts: vi.fn().mockReturnValue([

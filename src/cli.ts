@@ -2,11 +2,15 @@ import { Command } from "commander";
 import { glob } from "glob";
 import { resolve, basename, extname, join } from "node:path";
 import { statSync } from "node:fs";
+import { createRequire } from "node:module";
 import { ChromeSearchifyPrinter } from "./core/chrome-searchify-printer.js";
 import { PdfInfoExtractor } from "./utils/pdf-info.js";
 import { ConversionPipeline } from "./core/pipeline.js";
 import { NodeFileWriter } from "./utils/file-writer.js";
 import type { ConversionOptions } from "./types/index.js";
+
+const require = createRequire(import.meta.url);
+const pkgVersion = require("../package.json").version;
 
 export async function runCli(argv: string[]): Promise<void> {
   const program = new Command();
@@ -17,7 +21,7 @@ export async function runCli(argv: string[]): Promise<void> {
     .description(
       "Convert image-only PDFs to searchable PDFs using Chrome's built-in OCR (PDFSearchify)",
     )
-    .version("0.1.0")
+    .version(pkgVersion)
     .argument("<input>", "Input PDF file path or glob pattern")
     .option("-o, --output <path>", "Output file or directory path")
     .option("--chrome-path <path>", "Path to Chrome/Chromium executable")
@@ -40,32 +44,44 @@ export async function runCli(argv: string[]): Promise<void> {
         fileWriter,
       );
 
-      for (const file of files) {
-        const conversionOptions: ConversionOptions = {
-          inputPath: file,
-          outputPath: resolveOutputPath(file, options),
-          overwrite: options.overwrite as boolean | undefined,
-          verbose: options.verbose as boolean | undefined,
-          chromePath: options.chromePath as string | undefined,
-        };
+      let closed = false;
+      const cleanup = async (): Promise<void> => {
+        if (closed) return;
+        closed = true;
+        await searchifyPrinter.close();
+      };
 
-        if (options.verbose) {
-          console.log(`Processing: ${file}`);
-        }
+      process.once("SIGINT", () => void cleanup());
+      process.once("SIGTERM", () => void cleanup());
 
-        try {
-          const result = await pipeline.convert(conversionOptions);
-          console.log(
-            `Done: ${result.inputPath} -> ${result.outputPath} (${result.pageCount} pages, ${result.textSize} bytes)`,
-          );
-        } catch (error: unknown) {
-          const message =
-            error instanceof Error ? error.message : String(error);
-          console.error(`Failed: ${file}: ${message}`);
-          process.exitCode = 1;
-        } finally {
-          await searchifyPrinter.close();
+      try {
+        for (const file of files) {
+          const conversionOptions: ConversionOptions = {
+            inputPath: file,
+            outputPath: resolveOutputPath(file, options),
+            overwrite: options.overwrite as boolean | undefined,
+            verbose: options.verbose as boolean | undefined,
+            chromePath: options.chromePath as string | undefined,
+          };
+
+          if (options.verbose) {
+            console.log(`Processing: ${file}`);
+          }
+
+          try {
+            const result = await pipeline.convert(conversionOptions);
+            console.log(
+              `Done: ${result.inputPath} -> ${result.outputPath} (${result.pageCount} pages, ${result.textSize} bytes)`,
+            );
+          } catch (error: unknown) {
+            const message =
+              error instanceof Error ? error.message : String(error);
+            console.error(`Failed: ${file}: ${message}`);
+            process.exitCode = 1;
+          }
         }
+      } finally {
+        await cleanup();
       }
     });
 

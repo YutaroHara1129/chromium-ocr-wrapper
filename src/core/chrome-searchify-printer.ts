@@ -1,9 +1,10 @@
-import { chromium } from "playwright";
+import { chromium } from "playwright-core";
 import { spawn, type ChildProcess } from "node:child_process";
 import { cp, mkdtemp, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import type { Browser } from "playwright";
+import { pathToFileURL } from "node:url";
+import type { Browser, Frame } from "playwright-core";
 import type { IChromeSearchifyPrinter } from "../types/index.js";
 
 const DEFAULT_CHROME_PATHS: Record<string, string[]> = {
@@ -53,12 +54,12 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
       chromePath,
       [
         `--remote-debugging-port=${this.cdpPort}`,
+        "--remote-debugging-address=127.0.0.1",
         `--user-data-dir=${this.profileDir}`,
         "--no-first-run",
         "--no-default-browser-check",
         "--enable-features=PdfSearchify,PdfSearchifySave",
         "--disable-gpu",
-        "--no-sandbox",
       ],
       { stdio: ["ignore", "pipe", "pipe"], detached: false },
     );
@@ -73,7 +74,7 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
     const context = contexts[0]!;
     const page = await context.newPage();
 
-    const fileUrl = `file://${inputPath}`;
+    const fileUrl = pathToFileURL(inputPath).href;
     await page.goto(fileUrl, { waitUntil: "load", timeout: 15_000 });
     await page.waitForTimeout(3000);
 
@@ -189,7 +190,7 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
   }
 
   private async waitForSearchify(
-    viewerFrame: import("playwright").Frame,
+    viewerFrame: Frame,
     verbose?: boolean,
   ): Promise<boolean> {
     for (let attempt = 0; attempt < 10; attempt++) {

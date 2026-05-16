@@ -1,4 +1,5 @@
 import { dirname, join, extname, basename } from "node:path";
+import { stat } from "node:fs/promises";
 import type {
   IChromeSearchifyPrinter,
   IPdfInfoExtractor,
@@ -33,6 +34,20 @@ export class ConversionPipeline implements IConversionPipeline {
     );
 
     await this.fileWriter.ensureDir(dirname(outputPath));
+
+    if (!options.overwrite) {
+      try {
+        await stat(outputPath);
+        throw new Error(
+          `Output already exists: ${outputPath}. Use --overwrite to replace.`,
+        );
+      } catch (err) {
+        if (err instanceof Error && err.message.startsWith("Output already")) {
+          throw err;
+        }
+      }
+    }
+
     await this.fileWriter.writeFile(outputPath, searchifiedBytes);
 
     return {
