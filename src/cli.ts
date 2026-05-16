@@ -1,8 +1,9 @@
 import { Command } from "commander";
 import { glob } from "glob";
 import { resolve, basename, extname, join } from "node:path";
-import { statSync } from "node:fs";
+import { statSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
 import { ChromeSearchifyPrinter } from "./core/chrome-searchify-printer.js";
 import { PdfInfoExtractor } from "./utils/pdf-info.js";
 import { ConversionPipeline } from "./core/pipeline.js";
@@ -114,4 +115,24 @@ function resolveOutputPath(
   }
 
   return resolve(output);
+}
+
+const _isDirectExecution =
+  process.argv[1] !== undefined &&
+  import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+
+if (_isDirectExecution) {
+  runCli(process.argv).catch((error: unknown) => {
+    if (error && typeof error === "object" && "exitCode" in error) {
+      const { exitCode } = error as { exitCode?: unknown };
+
+      if (typeof exitCode === "number") {
+        process.exitCode = exitCode;
+        return;
+      }
+    }
+
+    console.error(error);
+    process.exitCode = 1;
+  });
 }
