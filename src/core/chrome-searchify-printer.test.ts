@@ -172,6 +172,24 @@ function mockSearchifyRuntime(options?: {
 describe("ChromeSearchifyPrinter", () => {
   let printer: ChromeSearchifyPrinter;
 
+  async function advanceUntilSettled(
+    promise: Promise<unknown>,
+    maxMs = 30_000,
+    stepMs = 200,
+  ): Promise<void> {
+    let settled = false;
+    promise.then(
+      () => { settled = true; },
+      () => { settled = true; },
+    );
+
+    for (let elapsed = 0; elapsed < maxMs && !settled; elapsed += stepMs) {
+      await vi.advanceTimersByTimeAsync(stepMs);
+    }
+
+    expect(settled, `promise did not settle within ${maxMs}ms`).toBe(true);
+  }
+
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useRealTimers();
@@ -239,6 +257,28 @@ describe("ChromeSearchifyPrinter", () => {
     mockProfile();
     mockFetchHealthy();
 
+    const platformChromePaths: Record<string, string[]> = {
+      darwin: [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+      ],
+      linux: [
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/chromium",
+      ],
+      win32: [
+        "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+        "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+      ],
+    };
+
+    const paths = platformChromePaths[process.platform] ?? [];
+    expect(
+      paths.length,
+      `no known Chrome paths for platform=${process.platform}`,
+    ).toBeGreaterThanOrEqual(2);
+
     vi.mocked(stat)
       .mockRejectedValueOnce(new Error("missing"))
       .mockResolvedValueOnce({} as never);
@@ -252,9 +292,10 @@ describe("ChromeSearchifyPrinter", () => {
 
     await printer.searchify("/tmp/input.pdf");
 
-    expect(stat).toHaveBeenCalledTimes(2);
+    expect(stat).toHaveBeenNthCalledWith(1, paths[0]);
+    expect(stat).toHaveBeenNthCalledWith(2, paths[1]);
     expect(spawn).toHaveBeenCalledWith(
-      expect.any(String),
+      paths[1],
       expect.any(Array),
       expect.any(Object),
     );
@@ -314,7 +355,9 @@ describe("ChromeSearchifyPrinter", () => {
     vi.useFakeTimers();
 
     mockProfile();
-    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("not ready"));
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("not ready"));
 
     const chromeProcess = createChromeProcess();
     vi.mocked(spawn).mockReturnValue(chromeProcess as never);
@@ -324,36 +367,41 @@ describe("ChromeSearchifyPrinter", () => {
     });
     promise.catch(() => {});
 
-    await vi.advanceTimersByTimeAsync(10_000);
+    await advanceUntilSettled(promise, 15_000);
+
+    const diagnostics = (): string =>
+      JSON.stringify({
+        spawnCalls: vi.mocked(spawn).mock.calls.length,
+        fetchCallCount: fetchSpy.mock.calls.length,
+        killCalls: chromeProcess.kill.mock.calls.length,
+        rmCalls: vi.mocked(rm).mock.calls.length,
+      });
 
     await expect(promise).rejects.toThrow("Chrome CDP connection timed out");
-    expect(chromeProcess.kill).toHaveBeenCalled();
-    expect(rm).toHaveBeenCalledWith("/tmp/chromium-ocr-test-profile", {
-      recursive: true,
-      force: true,
-    });
+    expect(chromeProcess.kill, diagnostics()).toHaveBeenCalled();
+    expect(rm, diagnostics()).toHaveBeenCalledWith(
+      "/tmp/chromium-ocr-test-profile",
+      {
+        recursive: true,
+        force: true,
+      },
+    );
   });
 
   it("throws when PDF viewer frame is missing and cleans up resources", async () => {
-    const page: MockPage = {
-      goto: vi.fn().mockResolvedValue(undefined),
-      waitForTimeout: vi.fn().mockResolvedValue(undefined),
-      frames: vi.fn().mockReturnValue([{}]),
-      close: vi.fn().mockResolvedValue(undefined),
-    };
+    const pageBundle = createPage();
+    pageBundle.page.frames.mockReturnValue([{}]);
 
-    const chromeProcess = createChromeProcess();
-    const { browser } = mockSearchifyRuntime({
+    const { chromeProcess, browser } = mockSearchifyRuntime({
       chromePath: "/custom/chrome",
-      page,
-      chromeProcess,
+      page: pageBundle.page,
     });
 
     await expect(
       printer.searchify("/tmp/input.pdf", { chromePath: "/custom/chrome" }),
     ).rejects.toThrow("PDF viewer frame not found");
 
-    expect(page.close).toHaveBeenCalled();
+    expect(pageBundle.page.close).toHaveBeenCalled();
     expect(browser.close).toHaveBeenCalled();
     expect(chromeProcess.kill).toHaveBeenCalled();
     expect(rm).toHaveBeenCalledWith("/tmp/chromium-ocr-test-profile", {
@@ -368,7 +416,10 @@ describe("ChromeSearchifyPrinter", () => {
         { hasSearchifyText: false, pdfSearchifySaveEnabled: true },
         { hasSearchifyText: true, pdfSearchifySaveEnabled: true },
       ],
-      saveResult: { dataToSave: [9, 8, 7], fileName: "searchified.pdf" },
+      saveResult: {
+        dataToSave: [9, 8, 7],
+        fileName: "searchified.pdf",
+      },
     });
 
     mockSearchifyRuntime({
@@ -380,26 +431,24 @@ describe("ChromeSearchifyPrinter", () => {
       chromePath: "/custom/chrome",
     });
 
+    expect(Array.from(result)).toEqual([9, 8, 7]);
+    expect(viewerFrame.evaluate).toHaveBeenCalledTimes(3);
     expect(viewerFrame.evaluate).toHaveBeenLastCalledWith(
       expect.any(Function),
       true,
     );
-    expect(Array.from(result)).toEqual([9, 8, 7]);
   });
 
   it("falls back to ORIGINAL when SEARCHIFIED save returns null", async () => {
-    const viewerFrame: MockViewerFrame = {
-      evaluate: vi
-        .fn()
-        .mockResolvedValueOnce({
-          hasSearchifyText: true,
-          pdfSearchifySaveEnabled: true,
-        })
-        .mockResolvedValueOnce({
-          dataToSave: [5, 4, 3],
-          fileName: "original.pdf",
-        }),
-    };
+    const viewerFrame = createViewerFrame({
+      readyChecks: [
+        { hasSearchifyText: true, pdfSearchifySaveEnabled: true },
+      ],
+      saveResult: {
+        dataToSave: [5, 4, 3],
+        fileName: "original.pdf",
+      },
+    });
 
     mockSearchifyRuntime({
       chromePath: "/custom/chrome",
@@ -410,15 +459,21 @@ describe("ChromeSearchifyPrinter", () => {
       chromePath: "/custom/chrome",
     });
 
+    expect(Array.from(result)).toEqual([5, 4, 3]);
+    expect(viewerFrame.evaluate).toHaveBeenCalledTimes(2);
     expect(viewerFrame.evaluate).toHaveBeenLastCalledWith(
       expect.any(Function),
       true,
     );
-    expect(Array.from(result)).toEqual([5, 4, 3]);
   });
 
   it("falls back to reading original input file when save returns no data", async () => {
+    vi.mocked(readFile).mockResolvedValue(Buffer.from([6, 6, 6]) as never);
+
     const viewerFrame = createViewerFrame({
+      readyChecks: [
+        { hasSearchifyText: true, pdfSearchifySaveEnabled: true },
+      ],
       saveResult: null,
     });
 
@@ -427,17 +482,19 @@ describe("ChromeSearchifyPrinter", () => {
       viewerFrame,
     });
 
-    vi.mocked(readFile).mockResolvedValue(Buffer.from([7, 7, 7]));
-
     const result = await printer.searchify("/tmp/input.pdf", {
       chromePath: "/custom/chrome",
     });
 
     expect(readFile).toHaveBeenCalledWith("/tmp/input.pdf");
-    expect(Array.from(result)).toEqual([7, 7, 7]);
+    expect(Array.from(result)).toEqual([6, 6, 6]);
+    expect(viewerFrame.evaluate).toHaveBeenLastCalledWith(
+      expect.any(Function),
+      true,
+    );
   });
 
-  it("returns original bytes when searchify readiness is never detected", async () => {
+  it("returns save result bytes when searchify readiness is never detected", async () => {
     vi.useFakeTimers();
 
     const viewerFrame = createViewerFrame({
@@ -445,7 +502,10 @@ describe("ChromeSearchifyPrinter", () => {
         hasSearchifyText: false,
         pdfSearchifySaveEnabled: true,
       })),
-      saveResult: { dataToSave: [1, 1, 1], fileName: "original.pdf" },
+      saveResult: {
+        dataToSave: [1, 1, 1],
+        fileName: "original.pdf",
+      },
     });
 
     mockSearchifyRuntime({
@@ -456,17 +516,18 @@ describe("ChromeSearchifyPrinter", () => {
     const promise = printer.searchify("/tmp/input.pdf", {
       chromePath: "/custom/chrome",
     });
+    promise.catch(() => {});
 
-    await vi.advanceTimersByTimeAsync(200);
-    await vi.advanceTimersByTimeAsync(10_000);
+    await advanceUntilSettled(promise, 15_000);
 
     const result = await promise;
 
+    expect(Array.from(result)).toEqual([1, 1, 1]);
+    expect(viewerFrame.evaluate).toHaveBeenCalledTimes(11);
     expect(viewerFrame.evaluate).toHaveBeenLastCalledWith(
       expect.any(Function),
       false,
     );
-    expect(Array.from(result)).toEqual([1, 1, 1]);
   });
 
   it("verbose mode logs diagnostic messages", async () => {

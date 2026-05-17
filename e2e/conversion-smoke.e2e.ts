@@ -63,7 +63,9 @@ describe("CLI conversion smoke", () => {
     expect(result.stdout).toContain(outputPdf);
 
     const outputStat = await stat(outputPdf);
-    expect(outputStat.size).toBeGreaterThan(0);
+    const diagnostics = `outputPdf=${outputPdf} exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`;
+
+    expect(outputStat.size, diagnostics).toBeGreaterThan(0);
     expect(await getPageCount(outputPdf)).toBe(1);
   });
 
@@ -76,9 +78,11 @@ describe("CLI conversion smoke", () => {
 
     const result = await runCli([inputPdf, "--output", outputPdf]);
 
-    expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain("Failed:");
-    expect(result.stderr).toMatch(/exist|overwrite/i);
+    const diagnostics = `exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`;
+
+    expect(result, diagnostics).toMatchObject({ exitCode: 1 });
+    expect(result.stderr, diagnostics).toContain("Failed:");
+    expect(result.stderr, diagnostics).toMatch(/Output already exists: .* Use --overwrite to replace\./);
   });
 
   it("overwrites existing output with --overwrite", async () => {
