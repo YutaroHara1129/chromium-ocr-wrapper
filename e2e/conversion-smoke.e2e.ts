@@ -10,9 +10,8 @@ import {
   createTextPdf,
 } from "./helpers/pdf-fixtures.js";
 
-describe.skipIf(!process.env.CHROME_PATH)("CLI conversion smoke", () => {
+describe("CLI conversion smoke", () => {
   const tempDirs: string[] = [];
-  const chromePath = process.env.CHROME_PATH as string;
 
   async function makeTempDir(): Promise<string> {
     const tempDir = await createTempDir();
@@ -38,15 +37,9 @@ describe.skipIf(!process.env.CHROME_PATH)("CLI conversion smoke", () => {
     ]);
     const outputPdf = join(tempDir, "output.pdf");
 
-    const result = await runCli([
-      inputPdf,
-      "--output",
-      outputPdf,
-      "--chrome-path",
-      chromePath,
-    ]);
+    const result = await runCli([inputPdf, "--output", outputPdf]);
 
-    expect(result.exitCode).toBe(0);
+    expect(result, `exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`).toMatchObject({ exitCode: 0 });
     expect(result.stderr).toBe("");
     expect(result.stdout).toContain("Done:");
     expect(result.stdout).toContain("2 pages");
@@ -61,11 +54,11 @@ describe.skipIf(!process.env.CHROME_PATH)("CLI conversion smoke", () => {
     const tempDir = await makeTempDir();
     const inputPdf = await createTextPdf(join(tempDir, "default.pdf"), "Default");
 
-    const result = await runCli([inputPdf, "--chrome-path", chromePath]);
+    const result = await runCli([inputPdf]);
 
     const outputPdf = join(tempDir, "default_searchable.pdf");
 
-    expect(result.exitCode).toBe(0);
+    expect(result, `exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`).toMatchObject({ exitCode: 0 });
     expect(result.stderr).toBe("");
     expect(result.stdout).toContain(outputPdf);
 
@@ -81,13 +74,7 @@ describe.skipIf(!process.env.CHROME_PATH)("CLI conversion smoke", () => {
 
     await createTextPdf(outputPdf, "Already exists");
 
-    const result = await runCli([
-      inputPdf,
-      "--output",
-      outputPdf,
-      "--chrome-path",
-      chromePath,
-    ]);
+    const result = await runCli([inputPdf, "--output", outputPdf]);
 
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("Failed:");
@@ -106,11 +93,9 @@ describe.skipIf(!process.env.CHROME_PATH)("CLI conversion smoke", () => {
       "--output",
       outputPdf,
       "--overwrite",
-      "--chrome-path",
-      chromePath,
     ]);
 
-    expect(result.exitCode).toBe(0);
+    expect(result, `exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`).toMatchObject({ exitCode: 0 });
     expect(result.stderr).toBe("");
     expect(result.stdout).toContain("Done:");
 
@@ -127,15 +112,9 @@ describe.skipIf(!process.env.CHROME_PATH)("CLI conversion smoke", () => {
     await createTextPdf(join(tempDir, "one.pdf"), "One");
     await createTextPdf(join(tempDir, "two.pdf"), "Two");
 
-    const result = await runCli([
-      join(tempDir, "*.pdf"),
-      "--output",
-      outputDir,
-      "--chrome-path",
-      chromePath,
-    ]);
+    const result = await runCli([join(tempDir, "*.pdf"), "--output", outputDir]);
 
-    expect(result.exitCode).toBe(0);
+    expect(result, `exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`).toMatchObject({ exitCode: 0 });
     expect(result.stderr).toBe("");
     expect(result.stdout).toContain("one.pdf");
     expect(result.stdout).toContain("two.pdf");
