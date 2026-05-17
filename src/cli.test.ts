@@ -151,9 +151,22 @@ describe("runCli", () => {
     spy.mock.calls.map((call) => String(call[0])).join("");
 
   it("missing required input rejects with Commander error", async () => {
-    await expect(runCli(["node", "cli.js"])).rejects.toThrow(
-      /missing required argument/i,
-    );
+    let error: unknown;
+
+    try {
+      await runCli(["node", "cli.js"]);
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(
+      error,
+      "runCli should reject when required input is missing",
+    ).toBeInstanceOf(Error);
+    expect(
+      (error as Error).message,
+      `actual error=${error instanceof Error ? error.message : String(error)}`,
+    ).toMatch(/missing required argument/i);
   });
 
   it("--help prints help text with all options", async () => {
@@ -287,6 +300,9 @@ describe("runCli", () => {
 
     await runCli(["node", "cli.js", "--output", "/output", "/docs/*.pdf"]);
 
+    // CLI output-directory resolution uses a fixed lowercase ".pdf" suffix
+    // regardless of input extension case, which differs from
+    // ConversionPipeline.generateOutputPath (preserves extension case).
     expect(mocks.pipelineInstances[0].convert).toHaveBeenNthCalledWith(
       1,
       expect.objectContaining({
@@ -408,10 +424,18 @@ describe("runCli", () => {
     const sigintHandler = registered.get("SIGINT");
     const sigtermHandler = registered.get("SIGTERM");
 
+    const registeredEvents = Array.from(registered.keys()).map(String);
+
     expect(onceSpy).toHaveBeenCalledWith("SIGINT", expect.any(Function));
     expect(onceSpy).toHaveBeenCalledWith("SIGTERM", expect.any(Function));
-    expect(sigintHandler).toBeDefined();
-    expect(sigtermHandler).toBeDefined();
+    expect(
+      sigintHandler,
+      `registered events=${JSON.stringify(registeredEvents)} onceCalls=${JSON.stringify(onceSpy.mock.calls.map(([ev]) => String(ev)))}`,
+    ).toBeDefined();
+    expect(
+      sigtermHandler,
+      `registered events=${JSON.stringify(registeredEvents)} onceCalls=${JSON.stringify(onceSpy.mock.calls.map(([ev]) => String(ev)))}`,
+    ).toBeDefined();
     expect(removeListenerSpy).toHaveBeenCalledWith("SIGINT", sigintHandler);
     expect(removeListenerSpy).toHaveBeenCalledWith("SIGTERM", sigtermHandler);
   });

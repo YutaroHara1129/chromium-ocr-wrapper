@@ -94,7 +94,10 @@ describe("CLI contract", () => {
     const result = await runCli([]);
 
     expect(result.exitCode).not.toBe(0);
-    expect(result.stderr).toMatch(/missing required argument|error/i);
+    expect(
+      result.stderr,
+      `exitCode=${result.exitCode} stdout=${result.stdout} stderr=${result.stderr}`,
+    ).toMatch(/error: missing required argument ['"]input['"]/i);
   });
 
   it('no matching glob exits non-zero with "No PDF files found"', async () => {

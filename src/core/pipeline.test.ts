@@ -78,19 +78,19 @@ describe("ConversionPipeline", () => {
       outputPath: "/output/test.pdf",
     });
 
-    expect(result.inputPath).toBe("/input/test.pdf");
-    expect(result.outputPath).toBe("/output/test.pdf");
-    expect(result.pageCount).toBe(2);
-    expect(result.textSize).toBe(3);
+    expect.soft(result.inputPath).toBe("/input/test.pdf");
+    expect.soft(result.outputPath).toBe("/output/test.pdf");
+    expect.soft(result.pageCount).toBe(2);
+    expect.soft(result.textSize).toBe(3);
 
-    expect(mocks.pdfInfoExtractor.readPdfBytes).toHaveBeenCalledWith("/input/test.pdf");
-    expect(mocks.pdfInfoExtractor.getMetadata).toHaveBeenCalledWith(new Uint8Array([1, 2, 3]));
-    expect(mocks.searchifyPrinter.searchify).toHaveBeenCalledWith("/input/test.pdf", {
+    expect.soft(mocks.pdfInfoExtractor.readPdfBytes).toHaveBeenCalledWith("/input/test.pdf");
+    expect.soft(mocks.pdfInfoExtractor.getMetadata).toHaveBeenCalledWith(new Uint8Array([1, 2, 3]));
+    expect.soft(mocks.searchifyPrinter.searchify).toHaveBeenCalledWith("/input/test.pdf", {
       chromePath: undefined,
       verbose: undefined,
     });
-    expect(mocks.fileWriter.ensureDir).toHaveBeenCalledWith(dirname("/output/test.pdf"));
-    expect(mocks.fileWriter.writeFile).toHaveBeenCalledWith(
+    expect.soft(mocks.fileWriter.ensureDir).toHaveBeenCalledWith(dirname("/output/test.pdf"));
+    expect.soft(mocks.fileWriter.writeFile).toHaveBeenCalledWith(
       "/output/test.pdf",
       new Uint8Array([4, 5, 6]),
     );
