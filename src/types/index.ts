@@ -23,21 +23,28 @@ export interface ConversionOptions {
   chromePath?: string;
 }
 
+export interface SearchifyToFileOptions {
+  chromePath?: string;
+  verbose?: boolean;
+  saveTimeoutMs?: number;
+  uploadTimeoutMs?: number;
+}
+
 export interface IChromeSearchifyPrinter {
-  searchify(
+  searchifyToFile(
     inputPath: string,
-    options?: { chromePath?: string; verbose?: boolean },
-  ): Promise<Uint8Array>;
+    outputPath: string,
+    options?: SearchifyToFileOptions,
+  ): Promise<void>;
+
   close(): Promise<void>;
 }
 
 export interface IPdfInfoExtractor {
-  getMetadata(pdfBytes: Uint8Array): Promise<PdfMetadata>;
-  readPdfBytes(filePath: string): Promise<Uint8Array>;
+  getMetadataFromFile(filePath: string): Promise<PdfMetadata>;
 }
 
 export interface IFileWriter {
-  writeFile(path: string, data: Uint8Array): Promise<void>;
   ensureDir(path: string): Promise<void>;
 }
 

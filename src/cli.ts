@@ -2,6 +2,7 @@ import { Command } from "commander";
 import { glob } from "glob";
 import { resolve, basename, extname, join } from "node:path";
 import { statSync, realpathSync } from "node:fs";
+import { spawn as spawnChild } from "node:child_process";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { ChromeSearchifyPrinter } from "./core/chrome-searchify-printer.js";
@@ -12,6 +13,8 @@ import type { ConversionOptions } from "./types/index.js";
 
 const require = createRequire(import.meta.url);
 const pkgVersion = require("../package.json").version;
+
+const HEAP_REEXEC_MARKER = "CHROMIUM_OCR_HEAP_REEXEC";
 
 export async function runCli(argv: string[]): Promise<void> {
   const program = new Command();
@@ -122,22 +125,113 @@ function resolveOutputPath(
   return resolve(output);
 }
 
+function getCurrentMaxOldSpaceMb(): number | undefined {
+  const arg = process.execArgv.find((a) =>
+    a.startsWith("--max-old-space-size="),
+  );
+  if (!arg) return undefined;
+  const mb = parseInt(arg.split("=")[1] ?? "", 10);
+  return Number.isNaN(mb) ? undefined : mb;
+}
+
+function recommendedHeapMb(bytes: number): number {
+  if (bytes < 50 * 1024 * 1024) return 4096;
+  if (bytes < 100 * 1024 * 1024) return 6144;
+  if (bytes < 200 * 1024 * 1024) return 8192;
+  return 12288;
+}
+
+async function resolveLargestInputSize(argv: string[]): Promise<number> {
+  const knownFlags = new Set(["-o", "--output", "--chrome-path"]);
+  let input: string | undefined;
+
+  for (let i = 2; i < argv.length; i++) {
+    const arg = argv[i];
+    if (!arg) continue;
+    if (knownFlags.has(arg)) {
+      i++;
+      continue;
+    }
+    if (arg.startsWith("-")) continue;
+    input = arg;
+    break;
+  }
+
+  if (!input) return 0;
+
+  const files = await resolveInputFiles(input);
+  let maxSize = 0;
+  for (const f of files) {
+    try {
+      const s = statSync(f);
+      if (s.size > maxSize) maxSize = s.size;
+    } catch {
+      continue;
+    }
+  }
+  return maxSize;
+}
+
+async function maybeReexecWithLargerHeap(argv: string[]): Promise<boolean> {
+  if (process.env[HEAP_REEXEC_MARKER] === "1") return false;
+
+  const largestSize = await resolveLargestInputSize(argv);
+  if (largestSize === 0) return false;
+
+  const recommended = recommendedHeapMb(largestSize);
+  const current = getCurrentMaxOldSpaceMb();
+
+  if (current !== undefined && current >= recommended) return false;
+
+  const child = spawnChild(
+    process.execPath,
+    [
+      `--max-old-space-size=${recommended}`,
+      ...process.execArgv.filter(
+        (arg) => !arg.startsWith("--max-old-space-size="),
+      ),
+      realpathSync(argv[1]!),
+      ...argv.slice(2),
+    ],
+    {
+      stdio: "inherit",
+      env: { ...process.env, [HEAP_REEXEC_MARKER]: "1" },
+    },
+  );
+
+  return new Promise<boolean>((resolve) => {
+    child.on("close", (code) => {
+      process.exitCode = code ?? 0;
+      resolve(true);
+    });
+    child.on("error", () => {
+      resolve(false);
+    });
+  });
+}
+
 const _isDirectExecution =
   process.argv[1] !== undefined &&
   import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
 
 if (_isDirectExecution) {
-  runCli(process.argv).catch((error: unknown) => {
-    if (error && typeof error === "object" && "exitCode" in error) {
-      const { exitCode } = error as { exitCode?: unknown };
+  maybeReexecWithLargerHeap(process.argv).then(async (reexeced) => {
+    if (reexeced) return;
 
-      if (typeof exitCode === "number") {
-        process.exitCode = exitCode;
-        return;
+    try {
+      await runCli(process.argv);
+    } catch (error: unknown) {
+      if (error && typeof error === "object" && "exitCode" in error) {
+        const { exitCode } = error as { exitCode?: unknown };
+
+        if (typeof exitCode === "number") {
+          process.exitCode = exitCode;
+          return;
+        }
       }
-    }
 
-    console.error(error);
-    process.exitCode = 1;
+      console.error(error);
+      process.exitCode = 1;
+    }
   });
 }

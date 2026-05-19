@@ -3,7 +3,8 @@ import { PDFDocument } from "pdf-lib";
 import type { IPdfInfoExtractor, PdfMetadata } from "../types/index.js";
 
 export class PdfInfoExtractor implements IPdfInfoExtractor {
-  async getMetadata(pdfBytes: Uint8Array): Promise<PdfMetadata> {
+  async getMetadataFromFile(filePath: string): Promise<PdfMetadata> {
+    const pdfBytes = await readFile(filePath);
     const doc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
     const pages = doc.getPages();
 
@@ -14,10 +15,5 @@ export class PdfInfoExtractor implements IPdfInfoExtractor {
         return { width, height };
       }),
     };
-  }
-
-  async readPdfBytes(filePath: string): Promise<Uint8Array> {
-    const buffer = await readFile(filePath);
-    return new Uint8Array(buffer);
   }
 }

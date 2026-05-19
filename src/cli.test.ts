@@ -11,7 +11,7 @@ type ConversionOptionsLike = {
 };
 
 type MockPrinterInstance = {
-  searchify: MockFn;
+  searchifyToFile: MockFn;
   close: MockFn;
 };
 
@@ -62,7 +62,7 @@ vi.mock("node:fs", () => ({
 vi.mock("./core/chrome-searchify-printer.js", () => ({
   ChromeSearchifyPrinter: vi.fn().mockImplementation(() => {
     const instance = {
-      searchify: vi.fn().mockResolvedValue(new Uint8Array([1, 2, 3])),
+      searchifyToFile: vi.fn().mockResolvedValue(undefined),
       close: vi.fn().mockResolvedValue(undefined),
     };
 
@@ -109,7 +109,7 @@ describe("runCli", () => {
 
     vi.mocked(ChromeSearchifyPrinter).mockImplementation(() => {
       const instance = {
-        searchify: vi.fn().mockResolvedValue(new Uint8Array([1, 2, 3])),
+        searchifyToFile: vi.fn().mockResolvedValue(undefined),
         close: vi.fn().mockResolvedValue(undefined),
       };
       mocks.printerInstances.push(instance);
@@ -300,9 +300,6 @@ describe("runCli", () => {
 
     await runCli(["node", "cli.js", "--output", "/output", "/docs/*.pdf"]);
 
-    // CLI output-directory resolution uses a fixed lowercase ".pdf" suffix
-    // regardless of input extension case, which differs from
-    // ConversionPipeline.generateOutputPath (preserves extension case).
     expect(mocks.pipelineInstances[0].convert).toHaveBeenNthCalledWith(
       1,
       expect.objectContaining({

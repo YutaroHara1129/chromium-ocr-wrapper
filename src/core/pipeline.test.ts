@@ -34,12 +34,11 @@ function createMocks(): {
 } {
   return {
     searchifyPrinter: {
-      searchify: vi.fn().mockResolvedValue(new Uint8Array([4, 5, 6])),
+      searchifyToFile: vi.fn().mockResolvedValue(undefined),
       close: vi.fn().mockResolvedValue(undefined),
     } as unknown as IChromeSearchifyPrinter,
     pdfInfoExtractor: {
-      readPdfBytes: vi.fn().mockResolvedValue(new Uint8Array([1, 2, 3])),
-      getMetadata: vi.fn().mockResolvedValue({
+      getMetadataFromFile: vi.fn().mockResolvedValue({
         pageCount: 2,
         pages: [
           { width: 595.28, height: 841.89 },
@@ -49,9 +48,13 @@ function createMocks(): {
     } as unknown as IPdfInfoExtractor,
     fileWriter: {
       ensureDir: vi.fn().mockResolvedValue(undefined),
-      writeFile: vi.fn().mockResolvedValue(undefined),
     } as unknown as IFileWriter,
   };
+}
+
+async function getStatMock(): Promise<ReturnType<typeof import("node:fs/promises")>["stat"]> {
+  const { stat } = await import("node:fs/promises");
+  return vi.mocked(stat);
 }
 
 describe("ConversionPipeline", () => {
@@ -60,9 +63,8 @@ describe("ConversionPipeline", () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
-    const { stat } = await import("node:fs/promises");
-    vi.mocked(stat).mockReset();
-    vi.mocked(stat).mockRejectedValue(enoentError());
+    const stat = await getStatMock();
+    stat.mockReset();
 
     mocks = createMocks();
     pipeline = new ConversionPipeline(
@@ -72,7 +74,16 @@ describe("ConversionPipeline", () => {
     );
   });
 
+  async function setupStatForNewOutput(outputSize = 12059): Promise<void> {
+    const stat = await getStatMock();
+    stat.mockReset();
+    stat.mockRejectedValueOnce(enoentError());
+    stat.mockResolvedValueOnce({ size: outputSize } as never);
+  }
+
   it("runs full conversion pipeline", async () => {
+    await setupStatForNewOutput(12059);
+
     const result = await pipeline.convert({
       inputPath: "/input/test.pdf",
       outputPath: "/output/test.pdf",
@@ -81,22 +92,25 @@ describe("ConversionPipeline", () => {
     expect.soft(result.inputPath).toBe("/input/test.pdf");
     expect.soft(result.outputPath).toBe("/output/test.pdf");
     expect.soft(result.pageCount).toBe(2);
-    expect.soft(result.textSize).toBe(3);
+    expect.soft(result.textSize).toBe(12059);
 
-    expect.soft(mocks.pdfInfoExtractor.readPdfBytes).toHaveBeenCalledWith("/input/test.pdf");
-    expect.soft(mocks.pdfInfoExtractor.getMetadata).toHaveBeenCalledWith(new Uint8Array([1, 2, 3]));
-    expect.soft(mocks.searchifyPrinter.searchify).toHaveBeenCalledWith("/input/test.pdf", {
-      chromePath: undefined,
-      verbose: undefined,
-    });
-    expect.soft(mocks.fileWriter.ensureDir).toHaveBeenCalledWith(dirname("/output/test.pdf"));
-    expect.soft(mocks.fileWriter.writeFile).toHaveBeenCalledWith(
+    expect.soft(mocks.pdfInfoExtractor.getMetadataFromFile).toHaveBeenCalledWith("/input/test.pdf");
+    expect.soft(mocks.searchifyPrinter.searchifyToFile).toHaveBeenCalledWith(
+      "/input/test.pdf",
       "/output/test.pdf",
-      new Uint8Array([4, 5, 6]),
+      {
+        chromePath: undefined,
+        verbose: undefined,
+      },
     );
+    expect.soft(mocks.fileWriter.ensureDir).toHaveBeenCalledWith(dirname("/output/test.pdf"));
   });
 
   it("generates default output path with _searchable suffix", async () => {
+    const stat = await getStatMock();
+    stat.mockRejectedValueOnce(enoentError("/input/test_searchable.pdf"));
+    stat.mockResolvedValueOnce({ size: 12059 } as never);
+
     const result = await pipeline.convert({
       inputPath: "/input/test.pdf",
     });
@@ -105,8 +119,8 @@ describe("ConversionPipeline", () => {
   });
 
   it("does not call OCR when output exists and overwrite is false", async () => {
-    const { stat } = await import("node:fs/promises");
-    vi.mocked(stat).mockResolvedValueOnce({} as never);
+    const stat = await getStatMock();
+    stat.mockResolvedValueOnce({} as never);
 
     await expect(
       pipeline.convert({
@@ -116,13 +130,13 @@ describe("ConversionPipeline", () => {
       }),
     ).rejects.toThrow("Output already exists: /output/exists.pdf. Use --overwrite to replace.");
 
-    expect(mocks.searchifyPrinter.searchify).not.toHaveBeenCalled();
-    expect(mocks.fileWriter.writeFile).not.toHaveBeenCalled();
+    expect(mocks.searchifyPrinter.searchifyToFile).not.toHaveBeenCalled();
   });
 
   it("allows overwrite when output exists and overwrite is true", async () => {
-    const { stat } = await import("node:fs/promises");
-    vi.mocked(stat).mockResolvedValueOnce({} as never);
+    const stat = await getStatMock();
+    stat.mockResolvedValueOnce({} as never);
+    stat.mockResolvedValueOnce({ size: 500 } as never);
 
     const result = await pipeline.convert({
       inputPath: "/input/test.pdf",
@@ -131,13 +145,13 @@ describe("ConversionPipeline", () => {
     });
 
     expect(result.outputPath).toBe("/output/exists.pdf");
-    expect(mocks.searchifyPrinter.searchify).toHaveBeenCalledTimes(1);
-    expect(mocks.fileWriter.writeFile).toHaveBeenCalled();
+    expect(mocks.searchifyPrinter.searchifyToFile).toHaveBeenCalledTimes(1);
   });
 
   it("continues when stat returns ENOENT", async () => {
-    const { stat } = await import("node:fs/promises");
-    vi.mocked(stat).mockRejectedValueOnce(enoentError("/output/new.pdf"));
+    const stat = await getStatMock();
+    stat.mockRejectedValueOnce(enoentError("/output/new.pdf"));
+    stat.mockResolvedValueOnce({ size: 300 } as never);
 
     const result = await pipeline.convert({
       inputPath: "/input/test.pdf",
@@ -146,13 +160,13 @@ describe("ConversionPipeline", () => {
     });
 
     expect(result.outputPath).toBe("/output/new.pdf");
-    expect(mocks.searchifyPrinter.searchify).toHaveBeenCalledTimes(1);
+    expect(mocks.searchifyPrinter.searchifyToFile).toHaveBeenCalledTimes(1);
   });
 
   it("propagates unexpected stat errors", async () => {
-    const { stat } = await import("node:fs/promises");
+    const stat = await getStatMock();
     const error = eaccesError("/output/protected.pdf");
-    vi.mocked(stat).mockRejectedValueOnce(error);
+    stat.mockRejectedValueOnce(error);
 
     await expect(
       pipeline.convert({
@@ -162,13 +176,14 @@ describe("ConversionPipeline", () => {
       }),
     ).rejects.toBe(error);
 
-    expect(mocks.searchifyPrinter.searchify).not.toHaveBeenCalled();
-    expect(mocks.fileWriter.writeFile).not.toHaveBeenCalled();
+    expect(mocks.searchifyPrinter.searchifyToFile).not.toHaveBeenCalled();
   });
 
-  it("propagates readPdfBytes input errors", async () => {
+  it("propagates getMetadataFromFile input errors", async () => {
+    await setupStatForNewOutput();
+
     const error = new Error("failed to read input PDF");
-    (mocks.pdfInfoExtractor.readPdfBytes as ReturnType<typeof vi.fn>).mockRejectedValueOnce(error);
+    (mocks.pdfInfoExtractor.getMetadataFromFile as ReturnType<typeof vi.fn>).mockRejectedValueOnce(error);
 
     await expect(
       pipeline.convert({
@@ -177,28 +192,14 @@ describe("ConversionPipeline", () => {
       }),
     ).rejects.toBe(error);
 
-    expect(mocks.searchifyPrinter.searchify).not.toHaveBeenCalled();
-    expect(mocks.fileWriter.writeFile).not.toHaveBeenCalled();
+    expect(mocks.searchifyPrinter.searchifyToFile).not.toHaveBeenCalled();
   });
 
-  it("propagates getMetadata parse errors", async () => {
-    const error = new Error("failed to parse PDF metadata");
-    (mocks.pdfInfoExtractor.getMetadata as ReturnType<typeof vi.fn>).mockRejectedValueOnce(error);
+  it("propagates searchifyToFile OCR errors", async () => {
+    await setupStatForNewOutput();
 
-    await expect(
-      pipeline.convert({
-        inputPath: "/input/broken.pdf",
-        outputPath: "/output/test.pdf",
-      }),
-    ).rejects.toBe(error);
-
-    expect(mocks.searchifyPrinter.searchify).not.toHaveBeenCalled();
-    expect(mocks.fileWriter.writeFile).not.toHaveBeenCalled();
-  });
-
-  it("propagates searchify OCR errors", async () => {
     const error = new Error("OCR failed");
-    (mocks.searchifyPrinter.searchify as ReturnType<typeof vi.fn>).mockRejectedValueOnce(error);
+    (mocks.searchifyPrinter.searchifyToFile as ReturnType<typeof vi.fn>).mockRejectedValueOnce(error);
 
     await expect(
       pipeline.convert({
@@ -206,25 +207,11 @@ describe("ConversionPipeline", () => {
         outputPath: "/output/test.pdf",
       }),
     ).rejects.toBe(error);
-
-    expect(mocks.fileWriter.writeFile).not.toHaveBeenCalled();
   });
 
-  it("propagates writeFile disk errors", async () => {
-    const error = new Error("disk full");
-    (mocks.fileWriter.writeFile as ReturnType<typeof vi.fn>).mockRejectedValueOnce(error);
+  it("passes chromePath and verbose options to searchifyToFile", async () => {
+    await setupStatForNewOutput(42);
 
-    await expect(
-      pipeline.convert({
-        inputPath: "/input/test.pdf",
-        outputPath: "/output/test.pdf",
-      }),
-    ).rejects.toBe(error);
-
-    expect(mocks.searchifyPrinter.searchify).toHaveBeenCalledTimes(1);
-  });
-
-  it("passes chromePath and verbose options exactly to searchify", async () => {
     await pipeline.convert({
       inputPath: "/input/test.pdf",
       outputPath: "/output/test.pdf",
@@ -232,22 +219,24 @@ describe("ConversionPipeline", () => {
       verbose: true,
     });
 
-    expect(mocks.searchifyPrinter.searchify).toHaveBeenCalledWith("/input/test.pdf", {
-      chromePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-      verbose: true,
-    });
+    expect(mocks.searchifyPrinter.searchifyToFile).toHaveBeenCalledWith(
+      "/input/test.pdf",
+      "/output/test.pdf",
+      {
+        chromePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        verbose: true,
+      },
+    );
   });
 
-  it("returns textSize equal to output byte length exactly", async () => {
-    const outputBytes = new Uint8Array([0, 1, 2, 3, 4, 5, 255]);
-    (mocks.searchifyPrinter.searchify as ReturnType<typeof vi.fn>).mockResolvedValueOnce(outputBytes);
+  it("returns textSize from output file stat", async () => {
+    await setupStatForNewOutput(98765);
 
     const result = await pipeline.convert({
       inputPath: "/input/test.pdf",
       outputPath: "/output/test.pdf",
     });
 
-    expect(result.textSize).toBe(outputBytes.length);
-    expect(result.textSize).toBe(7);
+    expect(result.textSize).toBe(98765);
   });
 });
