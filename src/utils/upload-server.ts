@@ -36,7 +36,7 @@ export async function createUploadServer(
         url.pathname !== "/upload" ||
         url.searchParams.get("token") !== token
       ) {
-        res.writeHead(403, { "Access-Control-Allow-Origin": "*" });
+        res.writeHead(403);
         res.end("Forbidden");
         return;
       }
@@ -50,7 +50,7 @@ export async function createUploadServer(
 
       ws.on("error", (err: Error) => {
         unlink(tempOutputPath).catch(() => {});
-        res.writeHead(500, { "Access-Control-Allow-Origin": "*" });
+        res.writeHead(500);
         res.end("Write error");
         rejectDone(err);
       });
@@ -69,7 +69,7 @@ export async function createUploadServer(
       req.on("error", (err: Error) => {
         ws.destroy();
         unlink(tempOutputPath).catch(() => {});
-        res.writeHead(500, { "Access-Control-Allow-Origin": "*" });
+        res.writeHead(500);
         res.end("Request error");
         rejectDone(err);
       });

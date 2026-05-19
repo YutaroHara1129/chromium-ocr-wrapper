@@ -56,6 +56,7 @@ describe("createUploadServer", () => {
 
       expect(response.status).toBe(403);
       expect(await response.text()).toBe("Forbidden");
+      expect(response.headers.get("access-control-allow-origin")).toBeNull();
     } finally {
       await server.close();
     }
@@ -69,6 +70,7 @@ describe("createUploadServer", () => {
       const response = await fetch(server.url, { method: "GET" });
 
       expect(response.status).toBe(403);
+      expect(response.headers.get("access-control-allow-origin")).toBeNull();
     } finally {
       await server.close();
     }
@@ -87,6 +89,7 @@ describe("createUploadServer", () => {
       });
 
       expect(response.status).toBe(403);
+      expect(response.headers.get("access-control-allow-origin")).toBeNull();
     } finally {
       await server.close();
     }
@@ -104,6 +107,7 @@ describe("createUploadServer", () => {
 
       expect(response.status).toBe(500);
       expect(await response.text()).toBe("Write error");
+      expect(response.headers.get("access-control-allow-origin")).toBeNull();
 
       await expect(server.done).rejects.toThrow();
     } finally {
