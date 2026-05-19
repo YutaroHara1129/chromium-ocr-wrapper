@@ -95,7 +95,7 @@ vi.mock("./core/pipeline.js", () => ({
 }));
 
 import { glob } from "glob";
-import { runCli } from "./cli.js";
+import { runCli, CLI_FLAGS } from "./cli.js";
 import { ChromeSearchifyPrinter } from "./core/chrome-searchify-printer.js";
 import { ConversionPipeline } from "./core/pipeline.js";
 
@@ -467,5 +467,30 @@ describe("runCli", () => {
     await runCli(["node", "cli.js", "/docs/input.pdf"]);
 
     expect(mocks.printerInstances[0].close).toHaveBeenCalledTimes(1);
+  });
+
+  it("CLI_FLAGS defines all options with correct metadata", async () => {
+    expect(CLI_FLAGS).toEqual([
+      {
+        flags: "-o, --output <path>",
+        description: "Output file or directory path",
+        hasValue: true,
+      },
+      {
+        flags: "--chrome-path <path>",
+        description: "Path to Chrome/Chromium executable",
+        hasValue: true,
+      },
+      {
+        flags: "--overwrite",
+        description: "Overwrite existing output files",
+        hasValue: false,
+      },
+      {
+        flags: "-v, --verbose",
+        description: "Enable verbose logging",
+        hasValue: false,
+      },
+    ]);
   });
 });

@@ -16,6 +16,35 @@ const pkgVersion = require("../package.json").version;
 
 const HEAP_REEXEC_MARKER = "CHROMIUM_OCR_HEAP_REEXEC";
 
+type CliFlagDefinition = {
+  flags: string;
+  description: string;
+  hasValue: boolean;
+};
+
+export const CLI_FLAGS = [
+  {
+    flags: "-o, --output <path>",
+    description: "Output file or directory path",
+    hasValue: true,
+  },
+  {
+    flags: "--chrome-path <path>",
+    description: "Path to Chrome/Chromium executable",
+    hasValue: true,
+  },
+  {
+    flags: "--overwrite",
+    description: "Overwrite existing output files",
+    hasValue: false,
+  },
+  {
+    flags: "-v, --verbose",
+    description: "Enable verbose logging",
+    hasValue: false,
+  },
+] as const satisfies readonly CliFlagDefinition[];
+
 export async function runCli(argv: string[]): Promise<void> {
   const program = new Command();
   program.exitOverride();
@@ -26,12 +55,13 @@ export async function runCli(argv: string[]): Promise<void> {
       "Convert image-only PDFs to searchable PDFs using Chrome's built-in OCR (PDFSearchify)",
     )
     .version(pkgVersion)
-    .argument("<input>", "Input PDF file path or glob pattern")
-    .option("-o, --output <path>", "Output file or directory path")
-    .option("--chrome-path <path>", "Path to Chrome/Chromium executable")
-    .option("--overwrite", "Overwrite existing output files")
-    .option("-v, --verbose", "Enable verbose logging")
-    .action(async (input: string, options: Record<string, unknown>) => {
+    .argument("<input>", "Input PDF file path or glob pattern");
+
+  for (const flag of CLI_FLAGS) {
+    program.option(flag.flags, flag.description);
+  }
+
+  program.action(async (input: string, options: Record<string, unknown>) => {
       const files = await resolveInputFiles(input);
 
       if (files.length === 0) {
@@ -141,8 +171,21 @@ function recommendedHeapMb(bytes: number): number {
   return 12288;
 }
 
+function getFlagNames(flags: string): string[] {
+  return flags
+    .split(",")
+    .map((part) => part.trim().split(/\s+/)[0])
+    .filter((name): name is string => Boolean(name));
+}
+
+const CLI_VALUE_FLAG_NAMES = new Set(
+  CLI_FLAGS
+    .filter((flag) => flag.hasValue)
+    .flatMap((flag) => getFlagNames(flag.flags)),
+);
+
 async function resolveLargestInputSize(argv: string[]): Promise<number> {
-  const knownFlags = new Set(["-o", "--output", "--chrome-path"]);
+  const knownFlags = CLI_VALUE_FLAG_NAMES;
   let input: string | undefined;
 
   for (let i = 2; i < argv.length; i++) {
