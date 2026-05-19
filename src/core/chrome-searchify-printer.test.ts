@@ -224,6 +224,7 @@ describe("ChromeSearchifyPrinter", () => {
         "--no-default-browser-check",
         "--enable-features=PdfSearchify,PdfSearchifySave",
         "--disable-gpu",
+        "--headless=new",
       ]),
       { stdio: ["ignore", "pipe", "pipe"], detached: false },
     );
@@ -348,6 +349,21 @@ describe("ChromeSearchifyPrinter", () => {
     );
     expect(chromium.connectOverCDP).toHaveBeenCalledWith(
       expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+$/),
+      { noDefaults: true },
+    );
+  });
+
+  it("spawns Chrome with --headless=new to suppress download UI", async () => {
+    mockSearchifyRuntime({ chromePath: "/custom/chrome" });
+
+    await printer.searchify("/tmp/input.pdf", {
+      chromePath: "/custom/chrome",
+    });
+
+    expect(spawn).toHaveBeenCalledWith(
+      "/custom/chrome",
+      expect.arrayContaining(["--headless=new"]),
+      expect.any(Object),
     );
   });
 

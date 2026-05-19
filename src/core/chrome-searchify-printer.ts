@@ -41,6 +41,8 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
       );
     }
 
+    await this.close();
+
     this.profileDir = await this.setupProfile();
     this.cdpPort = 9222 + Math.floor(Math.random() * 1000);
 
@@ -60,6 +62,7 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
         "--no-default-browser-check",
         "--enable-features=PdfSearchify,PdfSearchifySave",
         "--disable-gpu",
+        "--headless=new",
       ],
       { stdio: ["ignore", "pipe", "pipe"], detached: false },
     );
@@ -80,6 +83,7 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
 
       this.browser = await chromium.connectOverCDP(
         `http://127.0.0.1:${this.cdpPort}`,
+        { noDefaults: true },
       );
 
       const contexts = this.browser.contexts();
