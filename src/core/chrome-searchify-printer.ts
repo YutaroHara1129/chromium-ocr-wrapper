@@ -80,6 +80,7 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
 
       this.browser = await chromium.connectOverCDP(
         `http://127.0.0.1:${this.cdpPort}`,
+        { noDefaults: true },
       );
 
       const contexts = this.browser.contexts();

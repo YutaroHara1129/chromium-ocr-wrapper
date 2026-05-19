@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { PDFDocument } from "pdf-lib";
 import { runCli } from "./helpers/run-cli.js";
 import {
@@ -9,6 +10,8 @@ import {
   createTempDir,
   createTextPdf,
 } from "./helpers/pdf-fixtures.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 describe("CLI conversion smoke", () => {
   const tempDirs: string[] = [];
@@ -23,6 +26,11 @@ describe("CLI conversion smoke", () => {
     const bytes = await readFile(filePath);
     const doc = await PDFDocument.load(bytes);
     return doc.getPageCount();
+  }
+
+  function countFontObjects(pdfBytes: Buffer): number {
+    const text = pdfBytes.toString("latin1");
+    return (text.match(/\/Type\s*\/Font[^s]/g) || []).length;
   }
 
   afterEach(async () => {
@@ -130,5 +138,30 @@ describe("CLI conversion smoke", () => {
     expect((await stat(twoOutput)).size).toBeGreaterThan(0);
     expect(await getPageCount(oneOutput)).toBe(1);
     expect(await getPageCount(twoOutput)).toBe(1);
+  });
+
+  it("converts an image-only PDF to searchable PDF with OCR text layer", async () => {
+    const tempDir = await makeTempDir();
+    const inputPdf = resolve(__dirname, "fixtures/unprocessed.pdf");
+    const outputPdf = join(tempDir, "output.pdf");
+
+    const result = await runCli([inputPdf, "--output", outputPdf]);
+
+    const diagnostics = `exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`;
+    expect(result, diagnostics).toMatchObject({ exitCode: 0 });
+    expect(result.stderr, diagnostics).toBe("");
+    expect(result.stdout, diagnostics).toContain("Done:");
+    expect(result.stdout, diagnostics).toContain("3 pages");
+
+    const outputBytes = await readFile(outputPdf);
+    const inputBytes = await readFile(inputPdf);
+
+    const doc = await PDFDocument.load(outputBytes);
+    expect(doc.getPageCount()).toBe(3);
+
+    const fontCount = countFontObjects(outputBytes);
+    expect(fontCount, `${fontCount} font objects found, expected > 0`).toBeGreaterThan(0);
+
+    expect(outputBytes.equals(inputBytes)).toBe(false);
   });
 });

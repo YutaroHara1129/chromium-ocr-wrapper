@@ -348,6 +348,7 @@ describe("ChromeSearchifyPrinter", () => {
     );
     expect(chromium.connectOverCDP).toHaveBeenCalledWith(
       expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+$/),
+      { noDefaults: true },
     );
   });
 
