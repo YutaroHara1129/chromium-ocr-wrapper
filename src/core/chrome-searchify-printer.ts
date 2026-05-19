@@ -9,14 +9,16 @@ import {
   stat,
   unlink,
 } from "node:fs/promises";
-import { createWriteStream } from "node:fs";
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { join, dirname, basename } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
 import type { Browser, Frame, Page } from "playwright-core";
 import type { IChromeSearchifyPrinter, SearchifyToFileOptions } from "../types/index.js";
+import {
+  createUploadServer,
+  type UploadServerResult,
+} from "../utils/upload-server.js";
 
 const DEFAULT_CHROME_PATHS: Record<string, string[]> = {
   darwin: [
@@ -139,7 +141,7 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
       const saveTimeoutMs = options?.saveTimeoutMs ?? 120_000;
       const uploadTimeoutMs = options?.uploadTimeoutMs ?? 120_000;
 
-      uploadServer = await this.createUploadServer(tempOutputPath, uploadTimeoutMs);
+      uploadServer = await createUploadServer(tempOutputPath, uploadTimeoutMs);
 
       const uploadResult = await viewerFrame.evaluate(
         async (params: {
@@ -297,81 +299,6 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
     );
   }
 
-  private async createUploadServer(
-    tempOutputPath: string,
-    timeoutMs: number,
-  ): Promise<UploadServerResult> {
-    const token = randomUUID();
-    let resolveDone: (bytes: number) => void;
-    let rejectDone: (error: Error) => void;
-    const done = new Promise<number>((resolve, reject) => {
-      resolveDone = resolve;
-      rejectDone = reject;
-    });
-
-    const server = createServer((req: IncomingMessage, res: ServerResponse) => {
-      const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
-
-      if (req.method !== "POST" || url.pathname !== "/upload" || url.searchParams.get("token") !== token) {
-        res.writeHead(403, { "Access-Control-Allow-Origin": "*" });
-        res.end("Forbidden");
-        return;
-      }
-
-      const ws = createWriteStream(tempOutputPath);
-      let bytesWritten = 0;
-
-      req.on("data", (chunk: Buffer) => {
-        bytesWritten += chunk.length;
-      });
-
-      ws.on("error", (err: Error) => {
-        res.writeHead(500, { "Access-Control-Allow-Origin": "*" });
-        res.end("Write error");
-        rejectDone(err);
-      });
-
-      req.pipe(ws);
-
-      ws.on("finish", () => {
-        res.writeHead(200, {
-          "Access-Control-Allow-Origin": "*",
-          "Content-Type": "text/plain",
-        });
-        res.end("OK");
-        resolveDone(bytesWritten);
-      });
-
-      req.on("error", (err: Error) => {
-        ws.destroy();
-        unlink(tempOutputPath).catch(() => {});
-        res.writeHead(500, { "Access-Control-Allow-Origin": "*" });
-        res.end("Request error");
-        rejectDone(err);
-      });
-    });
-
-    await new Promise<void>((resolve) => {
-      server.listen(0, "127.0.0.1", () => resolve());
-    });
-
-    const address = server.address() as { port: number };
-    const url = `http://127.0.0.1:${address.port}/upload?token=${token}`;
-
-    const timeoutId = setTimeout(() => {
-      rejectDone(new Error(`Upload timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-
-    done.finally(() => clearTimeout(timeoutId));
-
-    const close = async (): Promise<void> => {
-      clearTimeout(timeoutId);
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    };
-
-    return { url, done, close };
-  }
-
   private async waitForSearchify(
     viewerFrame: Frame,
     verbose?: boolean,
@@ -454,9 +381,3 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
     return undefined;
   }
 }
-
-type UploadServerResult = {
-  url: string;
-  done: Promise<number>;
-  close: () => Promise<void>;
-};

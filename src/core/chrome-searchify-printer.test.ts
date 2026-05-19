@@ -24,16 +24,12 @@ vi.mock("playwright-core", () => ({
   },
 }));
 
-vi.mock("node:http", () => ({
-  createServer: vi.fn(),
-}));
-
-vi.mock("node:fs", () => ({
-  createWriteStream: vi.fn(),
+vi.mock("../utils/upload-server.js", () => ({
+  createUploadServer: vi.fn(),
 }));
 
 import { spawn } from "node:child_process";
-import { createServer } from "node:http";
+import { createUploadServer } from "../utils/upload-server.js";
 import { copyFile, cp, mkdtemp, rename, rm, stat, unlink } from "node:fs/promises";
 import { chromium } from "playwright-core";
 import { ChromeSearchifyPrinter } from "./chrome-searchify-printer.js";
@@ -149,17 +145,11 @@ function mockFetchHealthy(): void {
 }
 
 function mockUploadServer(): void {
-  const mockServer = {
-    listen: vi.fn().mockImplementation((_port: unknown, _host: unknown, cb: () => void) => {
-      cb();
-    }),
-    address: vi.fn().mockReturnValue({ port: 54321 }),
-    close: vi.fn().mockImplementation((cb: () => void) => {
-      cb();
-    }),
-  };
-
-  vi.mocked(createServer).mockReturnValue(mockServer as never);
+  vi.mocked(createUploadServer).mockResolvedValue({
+    url: "http://127.0.0.1:54321/upload?token=test-token",
+    done: Promise.resolve(1234),
+    close: vi.fn().mockResolvedValue(undefined),
+  });
 }
 
 function mockSearchifyRuntime(options?: {
@@ -612,19 +602,17 @@ describe("ChromeSearchifyPrinter", () => {
     expect(capturedFunction).not.toContain("Array.from");
   });
 
-  it("starts an upload server listening on 127.0.0.1", async () => {
+  it("delegates to createUploadServer with temp output path", async () => {
     mockSearchifyRuntime({ chromePath: "/custom/chrome" });
 
     await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
       chromePath: "/custom/chrome",
+      uploadTimeoutMs: 4567,
     });
 
-    expect(createServer).toHaveBeenCalled();
-    const mockServer = vi.mocked(createServer).mock.results[0]?.value;
-    expect(mockServer?.listen).toHaveBeenCalledWith(
-      0,
-      "127.0.0.1",
-      expect.any(Function),
+    expect(createUploadServer).toHaveBeenCalledWith(
+      expect.stringContaining(".output.pdf."),
+      4567,
     );
   });
 });
