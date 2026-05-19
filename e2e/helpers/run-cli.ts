@@ -46,7 +46,7 @@ export async function runCli(
           ...process.env,
           ...options.env,
         },
-        timeout: options.timeout ?? 120_000,
+        timeout: options.timeout ?? 45_000,
         maxBuffer: 10 * 1024 * 1024,
       },
       (error, stdout, stderr) => {
