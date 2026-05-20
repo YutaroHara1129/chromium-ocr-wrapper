@@ -553,7 +553,7 @@ describe("ChromeSearchifyPrinter", () => {
     expect(rm).toHaveBeenCalledTimes(1);
   });
 
-  it("close() ignores browser.close() and rm() failures", async () => {
+  it("close() propagates browser.close() and rm() failures", async () => {
     const { page } = createPage();
     const { browser } = createBrowser(page);
     browser.close.mockRejectedValue(new Error("browser close failed"));
@@ -571,7 +571,11 @@ describe("ChromeSearchifyPrinter", () => {
       chromePath: "/custom/chrome",
     });
 
-    await expect(printer.close()).resolves.toBeUndefined();
+    await expect(printer.close()).rejects.toSatisfy((err: unknown) => {
+      if (!(err instanceof AggregateError)) return false;
+      return err.errors.some((e) => e.message.includes("browser close failed"))
+        && err.errors.some((e) => e.message.includes("rm failed"));
+    });
   });
 
   it("searchifyToFile cleans up resources when connectOverCDP fails", async () => {
@@ -737,5 +741,159 @@ describe("ChromeSearchifyPrinter", () => {
     expect(rename).not.toHaveBeenCalled();
     expect(browser.close).toHaveBeenCalled();
     expect(chromeProcess.kill).toHaveBeenCalled();
+  });
+
+  it("propagates upload server close failure after successful upload", async () => {
+    const viewerFrame = createViewerFrame({
+      uploadResult: {
+        uploaded: true,
+        fileName: "saved.pdf",
+        byteLength: 1234,
+        saveType: "SEARCHIFIED" as const,
+      },
+    });
+
+    const uploadServerClose = vi
+      .fn()
+      .mockRejectedValue(new Error("upload server close failed"));
+
+    mockProfile();
+    mockFetchHealthy();
+    vi.mocked(createUploadServer).mockResolvedValue({
+      url: "http://127.0.0.1:54321/upload?token=test-token",
+      done: Promise.resolve(1234),
+      close: uploadServerClose,
+    });
+
+    const chromeProcess = createChromeProcess();
+    vi.mocked(spawn).mockReturnValue(chromeProcess as never);
+    const { page } = createPage(viewerFrame);
+    const { browser } = createBrowser(page);
+    vi.mocked(chromium.connectOverCDP).mockResolvedValue(browser as never);
+
+    await expect(
+      printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+        chromePath: "/custom/chrome",
+      }),
+    ).rejects.toThrow("upload server close failed");
+
+    expect(uploadServerClose).toHaveBeenCalled();
+    expect(rename).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves primary error when cleanup also fails", async () => {
+    const pageBundle = createPage();
+    pageBundle.page.goto.mockRejectedValue(new Error("goto failed"));
+    pageBundle.page.close.mockRejectedValue(new Error("page close failed"));
+
+    mockProfile();
+    const uploadServerClose = vi
+      .fn()
+      .mockRejectedValue(new Error("upload server close failed"));
+    vi.mocked(createUploadServer).mockResolvedValue({
+      url: "http://127.0.0.1:54321/upload?token=test-token",
+      done: Promise.resolve(1234),
+      close: uploadServerClose,
+    });
+    vi.mocked(unlink).mockRejectedValue(new Error("unlink failed"));
+    mockFetchHealthy();
+
+    const chromeProcess = createChromeProcess();
+    vi.mocked(spawn).mockReturnValue(chromeProcess as never);
+    const { browser } = createBrowser(pageBundle.page);
+    browser.close.mockRejectedValue(new Error("browser close failed"));
+    vi.mocked(rm).mockRejectedValue(new Error("rm failed"));
+    vi.mocked(chromium.connectOverCDP).mockResolvedValue(browser as never);
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(
+      printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+        chromePath: "/custom/chrome",
+      }),
+    ).rejects.toThrow("goto failed");
+
+    expect(pageBundle.page.close).toHaveBeenCalled();
+    expect(uploadServerClose).not.toHaveBeenCalled();
+    expect(unlink).toHaveBeenCalled();
+    expect(browser.close).toHaveBeenCalled();
+    expect(chromeProcess.kill).toHaveBeenCalled();
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("page close failed"),
+    );
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("unlink failed"),
+    );
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("close() failed during error cleanup"),
+    );
+  });
+
+  it("close() rejects when browser.close() times out", async () => {
+    const { page } = createPage();
+    const { browser } = createBrowser(page);
+    browser.close.mockReturnValue(new Promise(() => {}));
+
+    mockProfile();
+    mockUploadServer();
+    mockFetchHealthy();
+
+    const chromeProcess = createChromeProcess();
+    vi.mocked(spawn).mockReturnValue(chromeProcess as never);
+    vi.mocked(chromium.connectOverCDP).mockResolvedValue(browser as never);
+
+    await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+      chromePath: "/custom/chrome",
+    });
+
+    vi.useFakeTimers();
+    const closePromise = printer.close();
+    closePromise.catch(() => {});
+    await vi.advanceTimersByTimeAsync(5_100);
+    await expect(closePromise).rejects.toThrow(
+      "browser.close() timed out after 5000ms",
+    );
+    vi.useRealTimers();
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+
+  it("logs optional Screen AI profile copy failures in verbose mode", async () => {
+    const originalHome = process.env.HOME;
+    process.env.HOME = "/Users/tester";
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    mockFetchHealthy();
+    mockUploadServer();
+
+    const chromeProcess = createChromeProcess();
+    vi.mocked(spawn).mockReturnValue(chromeProcess as never);
+    const { page } = createPage();
+    const { browser } = createBrowser(page);
+    vi.mocked(chromium.connectOverCDP).mockResolvedValue(browser as never);
+
+    vi.mocked(cp).mockImplementation(async (src: string) => {
+      if (typeof src === "string" && src.includes("screen_ai")) {
+        throw new Error("screen_ai not found");
+      }
+      if (typeof src === "string" && src.includes("Local State")) {
+        throw new Error("Local State not found");
+      }
+      return undefined;
+    });
+    vi.mocked(mkdtemp).mockResolvedValue("/tmp/chromium-ocr-test-profile");
+    vi.mocked(stat).mockResolvedValue({} as never);
+
+    await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+      chromePath: "/custom/chrome",
+      verbose: true,
+    });
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Optional profile asset copy failed"),
+    );
+
+    process.env.HOME = originalHome;
   });
 });

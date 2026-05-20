@@ -7,6 +7,14 @@ import {
 } from "node:http";
 import { randomUUID } from "node:crypto";
 
+function cleanupPartialUpload(tempOutputPath: string): void {
+  void unlink(tempOutputPath).catch(() => {
+    // Best-effort cleanup only. The stream/request error is propagated through
+    // `done`; unlink may fail because the temp file was never created.
+    // The rejection is handled here to avoid an unhandled promise rejection.
+  });
+}
+
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -64,7 +72,7 @@ export async function createUploadServer(
       });
 
       ws.on("error", (err: Error) => {
-        unlink(tempOutputPath).catch(() => {});
+        cleanupPartialUpload(tempOutputPath);
         res.writeHead(500, CORS_HEADERS);
         res.end("Write error");
         rejectDone(err);
@@ -83,7 +91,7 @@ export async function createUploadServer(
 
       req.on("error", (err: Error) => {
         ws.destroy();
-        unlink(tempOutputPath).catch(() => {});
+        cleanupPartialUpload(tempOutputPath);
         res.writeHead(500, CORS_HEADERS);
         res.end("Request error");
         rejectDone(err);

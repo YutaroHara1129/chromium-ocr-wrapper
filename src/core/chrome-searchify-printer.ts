@@ -20,6 +20,8 @@ import {
   type UploadServerResult,
 } from "../utils/upload-server.js";
 
+const BROWSER_CLOSE_TIMEOUT_MS = 5_000;
+
 const DEFAULT_CHROME_PATHS: Record<string, string[]> = {
   darwin: [
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -61,7 +63,7 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
 
     await this.close();
 
-    this.profileDir = await this.setupProfile();
+    this.profileDir = await this.setupProfile(options?.verbose);
     this.cdpPort = 9222 + Math.floor(Math.random() * 1000);
 
     if (options?.verbose) {
@@ -264,34 +266,90 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
         await rename(tempOutputPath, outputPath);
       }
 
-      await uploadServer.close().catch(() => {});
+      await uploadServer.close();
     } catch (error) {
       if (page) {
-        await page.close().catch(() => {});
+        try {
+          await page.close();
+        } catch (closeError) {
+          const msg = closeError instanceof Error ? closeError.message : String(closeError);
+          console.error(`[ChromeSearchifyPrinter] page.close() failed during error cleanup: ${msg}`);
+        }
       }
       if (uploadServer) {
-        await uploadServer.close().catch(() => {});
+        try {
+          await uploadServer.close();
+        } catch (closeError) {
+          const msg = closeError instanceof Error ? closeError.message : String(closeError);
+          console.error(`[ChromeSearchifyPrinter] uploadServer.close() failed during error cleanup: ${msg}`);
+        }
       }
-      await unlink(tempOutputPath).catch(() => {});
-      await this.close();
+      try {
+        await unlink(tempOutputPath);
+      } catch (unlinkError) {
+        const msg = unlinkError instanceof Error ? unlinkError.message : String(unlinkError);
+        console.error(`[ChromeSearchifyPrinter] unlink() failed during error cleanup: ${msg}`);
+      }
+      try {
+        await this.close();
+      } catch (closeError) {
+        const msg = closeError instanceof Error ? closeError.message : String(closeError);
+        console.error(`[ChromeSearchifyPrinter] close() failed during error cleanup: ${msg}`);
+      }
       throw error;
     }
   }
 
   async close(): Promise<void> {
+    const errors: Error[] = [];
+
     this.killProcessGroup();
-    if (this.browser) {
-      const timeout = new Promise<void>((resolve) => setTimeout(resolve, 5000));
-      await Promise.race([this.browser.close(), timeout]).catch(
-        () => undefined,
-      );
-      this.browser = null;
+
+    const browser = this.browser;
+    this.browser = null;
+
+    if (browser) {
+      try {
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([
+          browser.close(),
+          new Promise<never>((_, reject) => {
+            timeoutId = setTimeout(
+              () =>
+                reject(
+                  new Error(
+                    `browser.close() timed out after ${BROWSER_CLOSE_TIMEOUT_MS}ms`,
+                  ),
+                ),
+              BROWSER_CLOSE_TIMEOUT_MS,
+            );
+          }),
+        ]);
+        if (timeoutId !== undefined) clearTimeout(timeoutId);
+      } catch (error) {
+        errors.push(error instanceof Error ? error : new Error(String(error)));
+      }
     }
-    if (this.profileDir) {
-      await rm(this.profileDir, { recursive: true, force: true }).catch(
-        () => undefined,
+
+    const profileDir = this.profileDir;
+    this.profileDir = null;
+
+    if (profileDir) {
+      try {
+        await rm(profileDir, { recursive: true, force: true });
+      } catch (error) {
+        errors.push(error instanceof Error ? error : new Error(String(error)));
+      }
+    }
+
+    if (errors.length === 1) {
+      throw errors[0];
+    }
+    if (errors.length > 1) {
+      throw new AggregateError(
+        errors,
+        "ChromeSearchifyPrinter cleanup failed",
       );
-      this.profileDir = null;
     }
   }
 
@@ -342,21 +400,46 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
     return false;
   }
 
-  private async setupProfile(): Promise<string> {
+  private async setupProfile(verbose?: boolean): Promise<string> {
     const profileDir = await mkdtemp(join(tmpdir(), "chromium-ocr-"));
     const homeDir = process.env.HOME ?? "";
 
     const screenAiSrc = `${homeDir}/Library/Application Support/Google/Chrome/screen_ai`;
     const localStateSrc = `${homeDir}/Library/Application Support/Google/Chrome/Local State`;
 
-    await cp(screenAiSrc, `${profileDir}/screen_ai`, {
-      recursive: true,
-    }).catch(() => undefined);
-    await cp(localStateSrc, `${profileDir}/Local State`).catch(
-      () => undefined,
+    await this.copyOptionalProfileAsset(
+      screenAiSrc,
+      `${profileDir}/screen_ai`,
+      { recursive: true, verbose },
+    );
+    await this.copyOptionalProfileAsset(
+      localStateSrc,
+      `${profileDir}/Local State`,
+      { verbose },
     );
 
     return profileDir;
+  }
+
+  private async copyOptionalProfileAsset(
+    source: string,
+    destination: string,
+    options?: { recursive?: boolean; verbose?: boolean },
+  ): Promise<void> {
+    try {
+      if (options?.recursive) {
+        await cp(source, destination, { recursive: true });
+      } else {
+        await cp(source, destination);
+      }
+    } catch (error) {
+      if (options?.verbose) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(
+          `[ChromeSearchifyPrinter] Optional profile asset copy failed: ${source} -> ${destination}: ${message}`,
+        );
+      }
+    }
   }
 
   private waitForCdp(port: number): Promise<void> {
