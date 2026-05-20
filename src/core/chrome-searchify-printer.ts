@@ -262,6 +262,8 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
         await copyFile(inputPath, tempOutputPath);
         await rename(tempOutputPath, outputPath);
       }
+
+      await uploadServer.close().catch(() => {});
     } catch (error) {
       if (page) {
         await page.close().catch(() => {});
@@ -276,11 +278,14 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
   }
 
   async close(): Promise<void> {
+    this.killProcessGroup();
     if (this.browser) {
-      await this.browser.close().catch(() => undefined);
+      const timeout = new Promise<void>((resolve) => setTimeout(resolve, 5000));
+      await Promise.race([this.browser.close(), timeout]).catch(
+        () => undefined,
+      );
       this.browser = null;
     }
-    this.killProcessGroup();
     if (this.profileDir) {
       await rm(this.profileDir, { recursive: true, force: true }).catch(
         () => undefined,
