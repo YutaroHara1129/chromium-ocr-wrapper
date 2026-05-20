@@ -82,7 +82,7 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
         "--disable-gpu",
         "--headless=new",
       ],
-      { stdio: ["ignore", "pipe", "pipe"], detached: false },
+      { stdio: ["ignore", "pipe", "pipe"], detached: true },
     );
 
     let spawnError: Error | null = null;
@@ -280,15 +280,23 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
       await this.browser.close().catch(() => undefined);
       this.browser = null;
     }
-    if (this.chromeProcess) {
-      this.chromeProcess.kill();
-      this.chromeProcess = null;
-    }
+    this.killProcessGroup();
     if (this.profileDir) {
       await rm(this.profileDir, { recursive: true, force: true }).catch(
         () => undefined,
       );
       this.profileDir = null;
+    }
+  }
+
+  killProcessGroup(): void {
+    if (this.chromeProcess) {
+      try {
+        process.kill(-this.chromeProcess.pid!, "SIGKILL");
+      } catch {
+        this.chromeProcess.kill("SIGKILL");
+      }
+      this.chromeProcess = null;
     }
   }
 

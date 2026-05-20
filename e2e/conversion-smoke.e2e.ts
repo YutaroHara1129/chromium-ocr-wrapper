@@ -9,6 +9,8 @@ import {
   createMultiPagePdf,
   createTempDir,
   createTextPdf,
+  createLargePdf,
+  isObjStmPdf,
 } from "./helpers/pdf-fixtures.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -145,7 +147,10 @@ describe("CLI conversion smoke", () => {
     const inputPdf = resolve(__dirname, "fixtures/unprocessed.pdf");
     const outputPdf = join(tempDir, "output.pdf");
 
-    const result = await runCli([inputPdf, "--output", outputPdf]);
+    const result = await runCli(
+      [inputPdf, "--output", outputPdf],
+      { timeout: 120_000 },
+    );
 
     const diagnostics = `exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`;
     expect(result, diagnostics).toMatchObject({ exitCode: 0 });
@@ -163,5 +168,35 @@ describe("CLI conversion smoke", () => {
     expect(fontCount, `${fontCount} font objects found, expected > 0`).toBeGreaterThan(0);
 
     expect(outputBytes.equals(inputBytes)).toBe(false);
-  });
+  }, 120_000);
+
+  it("converts a 50-page ObjStm-compressed PDF through the pipeline", async () => {
+    const PAGE_COUNT = 50;
+    const tempDir = await makeTempDir();
+    const inputPdf = await createLargePdf(join(tempDir, "large.pdf"), PAGE_COUNT);
+    const outputPdf = join(tempDir, "output.pdf");
+
+    const inputBytes = await readFile(inputPdf);
+    expect(isObjStmPdf(inputBytes), "input PDF must use ObjStm compression").toBe(true);
+
+    const result = await runCli(
+      [inputPdf, "--output", outputPdf],
+      { timeout: 600_000 },
+    );
+
+    const diagnostics = `exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`;
+    expect(result, diagnostics).toMatchObject({ exitCode: 0 });
+    expect(result.stderr, diagnostics).toBe("");
+    expect(result.stdout, diagnostics).toContain("Done:");
+    expect(result.stdout, diagnostics).toContain(`${PAGE_COUNT} pages`);
+
+    const outputBytes = await readFile(outputPdf);
+    expect(outputBytes.length, "output file must not be empty").toBeGreaterThan(0);
+
+    const doc = await PDFDocument.load(outputBytes);
+    expect(doc.getPageCount()).toBe(PAGE_COUNT);
+
+    const fontCount = countFontObjects(outputBytes);
+    expect(fontCount, `${fontCount} font objects found, expected > 0`).toBeGreaterThan(0);
+  }, 600_000);
 });

@@ -247,7 +247,7 @@ describe("ChromeSearchifyPrinter", () => {
         "--disable-gpu",
         "--headless=new",
       ]),
-      { stdio: ["ignore", "pipe", "pipe"], detached: false },
+      { stdio: ["ignore", "pipe", "pipe"], detached: true },
     );
   });
 

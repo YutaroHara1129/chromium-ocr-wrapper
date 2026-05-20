@@ -13,6 +13,7 @@ type ConversionOptionsLike = {
 type MockPrinterInstance = {
   searchifyToFile: MockFn;
   close: MockFn;
+  killProcessGroup: MockFn;
 };
 
 type MockPipelineInstance = {
@@ -64,6 +65,7 @@ vi.mock("./core/chrome-searchify-printer.js", () => ({
     const instance = {
       searchifyToFile: vi.fn().mockResolvedValue(undefined),
       close: vi.fn().mockResolvedValue(undefined),
+      killProcessGroup: vi.fn(),
     };
 
     mocks.printerInstances.push(instance);
@@ -111,6 +113,7 @@ describe("runCli", () => {
       const instance = {
         searchifyToFile: vi.fn().mockResolvedValue(undefined),
         close: vi.fn().mockResolvedValue(undefined),
+        killProcessGroup: vi.fn(),
       };
       mocks.printerInstances.push(instance);
       return instance;
@@ -466,6 +469,7 @@ describe("runCli", () => {
 
     await runCli(["node", "cli.js", "/docs/input.pdf"]);
 
+    expect(mocks.printerInstances[0].killProcessGroup).toHaveBeenCalledTimes(1);
     expect(mocks.printerInstances[0].close).toHaveBeenCalledTimes(1);
   });
 

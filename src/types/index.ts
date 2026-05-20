@@ -1,11 +1,5 @@
 export interface PdfMetadata {
   pageCount: number;
-  pages: PageDimension[];
-}
-
-export interface PageDimension {
-  width: number;
-  height: number;
 }
 
 export interface ConversionResult {
@@ -38,6 +32,7 @@ export interface IChromeSearchifyPrinter {
   ): Promise<void>;
 
   close(): Promise<void>;
+  killProcessGroup(): void;
 }
 
 export interface IPdfInfoExtractor {
