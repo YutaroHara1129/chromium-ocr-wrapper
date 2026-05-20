@@ -96,6 +96,50 @@ function createViewerFrame(options?: {
   return frame;
 }
 
+function createExecutingViewerFrame(options: {
+  saveResult?: { dataToSave: ArrayBuffer; fileName: string } | null;
+  uploadError?: Error;
+}): MockViewerFrame {
+  const frame = createViewerFrame();
+
+  frame.evaluate.mockImplementation(async (fn: unknown, params?: unknown) => {
+    if (typeof fn !== "function") return undefined;
+
+    const fnString = fn.toString();
+    if (fnString.includes("hasSearchifyText_")) {
+      return { hasSearchifyText: true, pdfSearchifySaveEnabled: true };
+    }
+
+    const originalViewer = (globalThis as Record<string, unknown>)["viewer"];
+    const originalFetch = globalThis.fetch;
+
+    try {
+      (globalThis as Record<string, unknown>)["viewer"] = {
+        currentController: {
+          handlePluginMessage_: vi.fn(),
+          save: vi.fn().mockResolvedValue(
+            options.saveResult ?? {
+              dataToSave: new Uint8Array([1, 2, 3]).buffer,
+              fileName: "saved.pdf",
+            },
+          ),
+        },
+      };
+
+      vi.spyOn(globalThis, "fetch").mockRejectedValue(
+        options.uploadError ?? new TypeError("Failed to fetch"),
+      );
+
+      return await (fn as (p: unknown) => Promise<unknown>)(params);
+    } finally {
+      (globalThis as Record<string, unknown>)["viewer"] = originalViewer;
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  return frame;
+}
+
 function createPage(viewerFrame?: MockViewerFrame): { page: MockPage; frame: MockViewerFrame } {
   const frame = viewerFrame ?? createViewerFrame();
 
@@ -614,5 +658,84 @@ describe("ChromeSearchifyPrinter", () => {
       expect.stringContaining(".output.pdf."),
       4567,
     );
+  });
+
+  it("propagates browser upload fetch failures instead of falling back to NO_DATA", async () => {
+    const viewerFrame = createExecutingViewerFrame({
+      uploadError: new TypeError("Failed to fetch"),
+    });
+
+    const { browser, chromeProcess } = mockSearchifyRuntime({
+      chromePath: "/custom/chrome",
+      viewerFrame,
+    });
+
+    await expect(
+      printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+        chromePath: "/custom/chrome",
+      }),
+    ).rejects.toThrow("Failed to fetch");
+
+    expect(copyFile).not.toHaveBeenCalled();
+    expect(rename).not.toHaveBeenCalled();
+    expect(browser.close).toHaveBeenCalled();
+    expect(chromeProcess.kill).toHaveBeenCalled();
+  });
+
+  it("propagates ORIGINAL path upload failures when SEARCHIFIED save returns null", async () => {
+    const callCount = { value: 0 };
+    const viewerFrame = createViewerFrame();
+    viewerFrame.evaluate.mockImplementation(async (fn: unknown, params?: unknown) => {
+      if (typeof fn !== "function") return undefined;
+
+      const fnString = fn.toString();
+      if (fnString.includes("hasSearchifyText_")) {
+        return { hasSearchifyText: true, pdfSearchifySaveEnabled: true };
+      }
+
+      const originalViewer = (globalThis as Record<string, unknown>)["viewer"];
+      const originalFetch = globalThis.fetch;
+
+      try {
+        callCount.value++;
+        (globalThis as Record<string, unknown>)["viewer"] = {
+          currentController: {
+            handlePluginMessage_: vi.fn(),
+            save: vi.fn().mockImplementation((saveType: string) => {
+              if (saveType === "SEARCHIFIED") return Promise.resolve(null);
+              return Promise.resolve({
+                dataToSave: new Uint8Array([1, 2, 3]).buffer,
+                fileName: "original.pdf",
+              });
+            }),
+          },
+        };
+
+        vi.spyOn(globalThis, "fetch").mockRejectedValue(
+          new TypeError("NetworkError when attempting to fetch resource"),
+        );
+
+        return await (fn as (p: unknown) => Promise<unknown>)(params);
+      } finally {
+        (globalThis as Record<string, unknown>)["viewer"] = originalViewer;
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    const { browser, chromeProcess } = mockSearchifyRuntime({
+      chromePath: "/custom/chrome",
+      viewerFrame,
+    });
+
+    await expect(
+      printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+        chromePath: "/custom/chrome",
+      }),
+    ).rejects.toThrow("NetworkError when attempting to fetch resource");
+
+    expect(copyFile).not.toHaveBeenCalled();
+    expect(rename).not.toHaveBeenCalled();
+    expect(browser.close).toHaveBeenCalled();
+    expect(chromeProcess.kill).toHaveBeenCalled();
   });
 });

@@ -7,6 +7,12 @@ import {
 } from "node:http";
 import { randomUUID } from "node:crypto";
 
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "content-type",
+} as const;
+
 export type UploadServerResult = {
   url: string;
   done: Promise<number>;
@@ -31,12 +37,21 @@ export async function createUploadServer(
     (req: IncomingMessage, res: ServerResponse) => {
       const url = new URL(req.url ?? "/", "http://127.0.0.1");
 
+      const isUploadPath = url.pathname === "/upload";
+      const hasValidToken = url.searchParams.get("token") === token;
+
+      if (req.method === "OPTIONS" && isUploadPath && hasValidToken) {
+        res.writeHead(204, CORS_HEADERS);
+        res.end();
+        return;
+      }
+
       if (
         req.method !== "POST" ||
-        url.pathname !== "/upload" ||
-        url.searchParams.get("token") !== token
+        !isUploadPath ||
+        !hasValidToken
       ) {
-        res.writeHead(403);
+        res.writeHead(403, CORS_HEADERS);
         res.end("Forbidden");
         return;
       }
@@ -50,7 +65,7 @@ export async function createUploadServer(
 
       ws.on("error", (err: Error) => {
         unlink(tempOutputPath).catch(() => {});
-        res.writeHead(500);
+        res.writeHead(500, CORS_HEADERS);
         res.end("Write error");
         rejectDone(err);
       });
@@ -59,7 +74,7 @@ export async function createUploadServer(
 
       ws.on("finish", () => {
         res.writeHead(200, {
-          "Access-Control-Allow-Origin": "*",
+          ...CORS_HEADERS,
           "Content-Type": "text/plain",
         });
         res.end("OK");
@@ -69,7 +84,7 @@ export async function createUploadServer(
       req.on("error", (err: Error) => {
         ws.destroy();
         unlink(tempOutputPath).catch(() => {});
-        res.writeHead(500);
+        res.writeHead(500, CORS_HEADERS);
         res.end("Request error");
         rejectDone(err);
       });

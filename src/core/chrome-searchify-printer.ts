@@ -223,8 +223,9 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
                 };
               }
             }
-          } catch {
-            // save failed
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            throw new Error(`Browser PDF save/upload failed: ${message}`);
           }
 
           return { uploaded: false, reason: "NO_DATA" };

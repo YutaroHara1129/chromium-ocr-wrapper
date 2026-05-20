@@ -4,6 +4,45 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createUploadServer } from "./upload-server.js";
 
+async function browserLikePdfUpload(
+  url: string,
+  body: Buffer,
+  origin = "chrome-extension://pdf-viewer",
+): Promise<Response> {
+  const preflight = await fetch(url, {
+    method: "OPTIONS",
+    headers: {
+      origin,
+      "access-control-request-method": "POST",
+      "access-control-request-headers": "content-type",
+    },
+  });
+
+  if (!preflight.ok) {
+    throw new TypeError(`CORS preflight failed with ${preflight.status}`);
+  }
+
+  expect(preflight.headers.get("access-control-allow-origin")).toBe("*");
+  expect(
+    preflight.headers.get("access-control-allow-methods"),
+  ).toContain("POST");
+  expect(
+    preflight.headers.get("access-control-allow-methods"),
+  ).toContain("OPTIONS");
+  expect(
+    preflight.headers.get("access-control-allow-headers")?.toLowerCase(),
+  ).toContain("content-type");
+
+  return fetch(url, {
+    method: "POST",
+    headers: {
+      origin,
+      "content-type": "application/pdf",
+    },
+    body,
+  });
+}
+
 describe("createUploadServer", () => {
   let tempDir: string;
 
@@ -56,7 +95,7 @@ describe("createUploadServer", () => {
 
       expect(response.status).toBe(403);
       expect(await response.text()).toBe("Forbidden");
-      expect(response.headers.get("access-control-allow-origin")).toBeNull();
+      expect(response.headers.get("access-control-allow-origin")).toBe("*");
     } finally {
       await server.close();
     }
@@ -70,7 +109,7 @@ describe("createUploadServer", () => {
       const response = await fetch(server.url, { method: "GET" });
 
       expect(response.status).toBe(403);
-      expect(response.headers.get("access-control-allow-origin")).toBeNull();
+      expect(response.headers.get("access-control-allow-origin")).toBe("*");
     } finally {
       await server.close();
     }
@@ -89,7 +128,7 @@ describe("createUploadServer", () => {
       });
 
       expect(response.status).toBe(403);
-      expect(response.headers.get("access-control-allow-origin")).toBeNull();
+      expect(response.headers.get("access-control-allow-origin")).toBe("*");
     } finally {
       await server.close();
     }
@@ -107,7 +146,7 @@ describe("createUploadServer", () => {
 
       expect(response.status).toBe(500);
       expect(await response.text()).toBe("Write error");
-      expect(response.headers.get("access-control-allow-origin")).toBeNull();
+      expect(response.headers.get("access-control-allow-origin")).toBe("*");
 
       await expect(server.done).rejects.toThrow();
     } finally {
@@ -158,5 +197,55 @@ describe("createUploadServer", () => {
     await expect(
       fetch(server.url, { method: "POST", body: Buffer.from("x") }),
     ).rejects.toThrow();
+  });
+
+  it("handles browser CORS preflight before PDF upload", async () => {
+    const outputPath = join(tempDir, "output.pdf");
+    const server = await createUploadServer(outputPath, 5_000);
+
+    try {
+      const body = Buffer.from("PDF-binary-content");
+
+      const response = await browserLikePdfUpload(server.url, body);
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("access-control-allow-origin")).toBe("*");
+      expect(await response.text()).toBe("OK");
+
+      await expect(server.done).resolves.toBe(body.length);
+      await expect(readFile(outputPath)).resolves.toEqual(body);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("includes CORS headers on rejected preflight requests", async () => {
+    const outputPath = join(tempDir, "output.pdf");
+    const server = await createUploadServer(outputPath, 5_000);
+
+    try {
+      const badUrl = new URL(server.url);
+      badUrl.searchParams.set("token", "wrong-token");
+
+      const response = await fetch(badUrl.toString(), {
+        method: "OPTIONS",
+        headers: {
+          origin: "chrome-extension://pdf-viewer",
+          "access-control-request-method": "POST",
+          "access-control-request-headers": "content-type",
+        },
+      });
+
+      expect(response.status).toBe(403);
+      expect(response.headers.get("access-control-allow-origin")).toBe("*");
+      expect(
+        response.headers.get("access-control-allow-methods"),
+      ).toContain("OPTIONS");
+      expect(
+        response.headers.get("access-control-allow-headers")?.toLowerCase(),
+      ).toContain("content-type");
+    } finally {
+      await server.close();
+    }
   });
 });
