@@ -245,7 +245,7 @@ describe("extractPageCount", () => {
     expect(extractPageCount(Buffer.from(pdf, "latin1"))).toBe(1);
   });
 
-  it("extracts count from nested Pages tree (root has highest count)", () => {
+  it("uses last /Count to avoid stale orphaned page trees", () => {
     const pdf = [
       "%PDF-1.4",
       "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj",
@@ -253,6 +253,17 @@ describe("extractPageCount", () => {
       "3 0 obj\n<< /Type /Pages /Kids [] /Count 5 >>\nendobj",
       "4 0 obj\n<< /Type /Pages /Kids [] /Count 5 >>\nendobj",
     ].join("\n");
-    expect(extractPageCount(Buffer.from(pdf, "latin1"))).toBe(10);
+    expect(extractPageCount(Buffer.from(pdf, "latin1"))).toBe(5);
+  });
+
+  it("prefers last /Count in incremental-update style PDF", () => {
+    const pdf = [
+      "%PDF-1.4",
+      "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj",
+      "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 3 >>\nendobj",
+      "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj",
+      "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 7 >>\nendobj",
+    ].join("\n");
+    expect(extractPageCount(Buffer.from(pdf, "latin1"))).toBe(7);
   });
 });
