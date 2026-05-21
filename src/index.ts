@@ -10,5 +10,4 @@ export type {
   ConversionResult,
   ConversionOptions,
   PdfMetadata,
-  PageDimension,
 } from "./types/index.js";

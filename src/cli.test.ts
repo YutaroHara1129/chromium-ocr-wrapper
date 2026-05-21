@@ -11,8 +11,9 @@ type ConversionOptionsLike = {
 };
 
 type MockPrinterInstance = {
-  searchify: MockFn;
+  searchifyToFile: MockFn;
   close: MockFn;
+  killProcessGroup: MockFn;
 };
 
 type MockPipelineInstance = {
@@ -62,8 +63,9 @@ vi.mock("node:fs", () => ({
 vi.mock("./core/chrome-searchify-printer.js", () => ({
   ChromeSearchifyPrinter: vi.fn().mockImplementation(() => {
     const instance = {
-      searchify: vi.fn().mockResolvedValue(new Uint8Array([1, 2, 3])),
+      searchifyToFile: vi.fn().mockResolvedValue(undefined),
       close: vi.fn().mockResolvedValue(undefined),
+      killProcessGroup: vi.fn(),
     };
 
     mocks.printerInstances.push(instance);
@@ -95,7 +97,7 @@ vi.mock("./core/pipeline.js", () => ({
 }));
 
 import { glob } from "glob";
-import { runCli } from "./cli.js";
+import { runCli, CLI_FLAGS } from "./cli.js";
 import { ChromeSearchifyPrinter } from "./core/chrome-searchify-printer.js";
 import { ConversionPipeline } from "./core/pipeline.js";
 
@@ -109,8 +111,9 @@ describe("runCli", () => {
 
     vi.mocked(ChromeSearchifyPrinter).mockImplementation(() => {
       const instance = {
-        searchify: vi.fn().mockResolvedValue(new Uint8Array([1, 2, 3])),
+        searchifyToFile: vi.fn().mockResolvedValue(undefined),
         close: vi.fn().mockResolvedValue(undefined),
+        killProcessGroup: vi.fn(),
       };
       mocks.printerInstances.push(instance);
       return instance;
@@ -300,9 +303,6 @@ describe("runCli", () => {
 
     await runCli(["node", "cli.js", "--output", "/output", "/docs/*.pdf"]);
 
-    // CLI output-directory resolution uses a fixed lowercase ".pdf" suffix
-    // regardless of input extension case, which differs from
-    // ConversionPipeline.generateOutputPath (preserves extension case).
     expect(mocks.pipelineInstances[0].convert).toHaveBeenNthCalledWith(
       1,
       expect.objectContaining({
@@ -469,6 +469,32 @@ describe("runCli", () => {
 
     await runCli(["node", "cli.js", "/docs/input.pdf"]);
 
+    expect(mocks.printerInstances[0].killProcessGroup).toHaveBeenCalledTimes(1);
     expect(mocks.printerInstances[0].close).toHaveBeenCalledTimes(1);
+  });
+
+  it("CLI_FLAGS defines all options with correct metadata", async () => {
+    expect(CLI_FLAGS).toEqual([
+      {
+        flags: "-o, --output <path>",
+        description: "Output file or directory path",
+        hasValue: true,
+      },
+      {
+        flags: "--chrome-path <path>",
+        description: "Path to Chrome/Chromium executable",
+        hasValue: true,
+      },
+      {
+        flags: "--overwrite",
+        description: "Overwrite existing output files",
+        hasValue: false,
+      },
+      {
+        flags: "-v, --verbose",
+        description: "Enable verbose logging",
+        hasValue: false,
+      },
+    ]);
   });
 });

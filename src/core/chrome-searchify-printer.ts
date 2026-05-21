@@ -1,11 +1,26 @@
 import { chromium } from "playwright-core";
 import { spawn, type ChildProcess } from "node:child_process";
-import { cp, mkdtemp, readFile, rm, stat } from "node:fs/promises";
-import { join } from "node:path";
+import {
+  copyFile,
+  cp,
+  mkdtemp,
+  rename,
+  rm,
+  stat,
+  unlink,
+} from "node:fs/promises";
+import { join, dirname, basename } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
+import { randomUUID } from "node:crypto";
 import type { Browser, Frame, Page } from "playwright-core";
-import type { IChromeSearchifyPrinter } from "../types/index.js";
+import type { IChromeSearchifyPrinter, SearchifyToFileOptions } from "../types/index.js";
+import {
+  createUploadServer,
+  type UploadServerResult,
+} from "../utils/upload-server.js";
+
+const BROWSER_CLOSE_TIMEOUT_MS = 5_000;
 
 const DEFAULT_CHROME_PATHS: Record<string, string[]> = {
   darwin: [
@@ -23,16 +38,21 @@ const DEFAULT_CHROME_PATHS: Record<string, string[]> = {
   ],
 };
 
+type BrowserUploadResult =
+  | { uploaded: true; fileName: string; byteLength: number; saveType: "SEARCHIFIED" | "ORIGINAL" }
+  | { uploaded: false; reason: string; status?: number };
+
 export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
   private browser: Browser | null = null;
   private chromeProcess: ChildProcess | null = null;
   private profileDir: string | null = null;
   private cdpPort = 9222 + Math.floor(Math.random() * 1000);
 
-  async searchify(
+  async searchifyToFile(
     inputPath: string,
-    options?: { chromePath?: string; verbose?: boolean },
-  ): Promise<Uint8Array> {
+    outputPath: string,
+    options?: SearchifyToFileOptions,
+  ): Promise<void> {
     const chromePath =
       options?.chromePath ?? (await this.findChrome());
     if (!chromePath) {
@@ -43,7 +63,7 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
 
     await this.close();
 
-    this.profileDir = await this.setupProfile();
+    this.profileDir = await this.setupProfile(options?.verbose);
     this.cdpPort = 9222 + Math.floor(Math.random() * 1000);
 
     if (options?.verbose) {
@@ -64,7 +84,7 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
         "--disable-gpu",
         "--headless=new",
       ],
-      { stdio: ["ignore", "pipe", "pipe"], detached: false },
+      { stdio: ["ignore", "pipe", "pipe"], detached: true },
     );
 
     let spawnError: Error | null = null;
@@ -73,6 +93,9 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
     });
 
     let page: Page | null = null;
+
+    const tempOutputPath = this.createTempOutputPath(outputPath);
+    let uploadServer: UploadServerResult | null = null;
 
     try {
       await this.waitForCdp(this.cdpPort);
@@ -117,13 +140,26 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
         );
       }
 
-      const saveResult = await viewerFrame.evaluate(
-        async (searchifyOk: boolean): Promise<{ dataToSave: number[]; fileName: string } | null> => {
+      const saveTimeoutMs = options?.saveTimeoutMs ?? 120_000;
+      const uploadTimeoutMs = options?.uploadTimeoutMs ?? 120_000;
+
+      uploadServer = await createUploadServer(tempOutputPath, uploadTimeoutMs);
+
+      const uploadResult = await viewerFrame.evaluate(
+        async (params: {
+          searchifyOk: boolean;
+          uploadUrl: string;
+          saveTimeoutMs: number;
+        }): Promise<BrowserUploadResult> => {
           const viewer = (globalThis as Record<string, unknown>)["viewer"];
-          if (!viewer || typeof viewer !== "object") return null;
+          if (!viewer || typeof viewer !== "object") {
+            return { uploaded: false, reason: "NO_VIEWER" };
+          }
 
           const ctrl = (viewer as Record<string, unknown>)["currentController"];
-          if (!ctrl || typeof ctrl !== "object") return null;
+          if (!ctrl || typeof ctrl !== "object") {
+            return { uploaded: false, reason: "NO_CONTROLLER" };
+          }
 
           const ctrlObj = ctrl as Record<string, unknown>;
           const origHandle = (ctrlObj["handlePluginMessage_"] as Function).bind(ctrl);
@@ -132,19 +168,32 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
           };
 
           try {
-            const saveType = searchifyOk ? "SEARCHIFIED" : "ORIGINAL";
+            const saveType = params.searchifyOk ? "SEARCHIFIED" : "ORIGINAL";
             const result = await Promise.race([
               (ctrlObj["save"] as Function).call(ctrl, saveType),
               new Promise<null>((resolve) =>
-                setTimeout(() => resolve(null), 15_000),
+                setTimeout(() => resolve(null), params.saveTimeoutMs),
               ),
             ]);
 
             if (result && (result as Record<string, unknown>)["dataToSave"]) {
               const r = result as { dataToSave: ArrayBuffer; fileName: string };
+              const blob = new Blob([r.dataToSave], { type: "application/pdf" });
+              const response = await fetch(params.uploadUrl, {
+                method: "POST",
+                headers: { "content-type": "application/pdf" },
+                body: blob,
+              });
+
+              if (!response.ok) {
+                return { uploaded: false, reason: "UPLOAD_FAILED", status: response.status };
+              }
+
               return {
-                dataToSave: Array.from(new Uint8Array(r.dataToSave)),
+                uploaded: true,
                 fileName: r.fileName,
+                byteLength: r.dataToSave.byteLength,
+                saveType,
               };
             }
 
@@ -152,64 +201,174 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
               const originalResult = await Promise.race([
                 (ctrlObj["save"] as Function).call(ctrl, "ORIGINAL"),
                 new Promise<null>((resolve) =>
-                  setTimeout(() => resolve(null), 15_000),
+                  setTimeout(() => resolve(null), params.saveTimeoutMs),
                 ),
               ]);
               if (originalResult && (originalResult as Record<string, unknown>)["dataToSave"]) {
                 const or = originalResult as { dataToSave: ArrayBuffer; fileName: string };
+                const blob = new Blob([or.dataToSave], { type: "application/pdf" });
+                const response = await fetch(params.uploadUrl, {
+                  method: "POST",
+                  headers: { "content-type": "application/pdf" },
+                  body: blob,
+                });
+
+                if (!response.ok) {
+                  return { uploaded: false, reason: "UPLOAD_FAILED", status: response.status };
+                }
+
                 return {
-                  dataToSave: Array.from(new Uint8Array(or.dataToSave)),
+                  uploaded: true,
                   fileName: or.fileName,
+                  byteLength: or.dataToSave.byteLength,
+                  saveType: "ORIGINAL",
                 };
               }
             }
-          } catch {
-            // save failed
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            throw new Error(`Browser PDF save/upload failed: ${message}`);
           }
 
-          return null;
+          return { uploaded: false, reason: "NO_DATA" };
         },
-        searchifyReady,
+        {
+          searchifyOk: searchifyReady,
+          uploadUrl: uploadServer.url,
+          saveTimeoutMs,
+        },
       );
 
       await page.close();
       page = null;
 
-      if (saveResult && saveResult.dataToSave.length > 0) {
-        return new Uint8Array(saveResult.dataToSave);
+      if (uploadResult.uploaded) {
+        await uploadServer.done;
+        const tempStats = await stat(tempOutputPath);
+        if (tempStats.size === 0) {
+          throw new Error("Upload completed but output file is empty");
+        }
+
+        if (options?.verbose) {
+          console.error(
+            `[ChromeSearchifyPrinter] Received ${tempStats.size} bytes via upload`,
+          );
+        }
+
+        await rename(tempOutputPath, outputPath);
+      } else {
+        if (options?.verbose) {
+          console.error(
+            `[ChromeSearchifyPrinter] Save returned no data (${uploadResult.reason}), copying original file`,
+          );
+        }
+        await copyFile(inputPath, tempOutputPath);
+        await rename(tempOutputPath, outputPath);
       }
 
-      if (options?.verbose) {
-        console.error(
-          "[ChromeSearchifyPrinter] Save returned no data, returning original PDF",
-        );
-      }
-      const originalBytes = await readFile(inputPath);
-      return new Uint8Array(originalBytes);
+      await uploadServer.close();
     } catch (error) {
       if (page) {
-        await page.close().catch(() => {});
+        try {
+          await page.close();
+        } catch (closeError) {
+          const msg = closeError instanceof Error ? closeError.message : String(closeError);
+          console.error(`[ChromeSearchifyPrinter] page.close() failed during error cleanup: ${msg}`);
+        }
       }
-      await this.close();
+      if (uploadServer) {
+        try {
+          await uploadServer.close();
+        } catch (closeError) {
+          const msg = closeError instanceof Error ? closeError.message : String(closeError);
+          console.error(`[ChromeSearchifyPrinter] uploadServer.close() failed during error cleanup: ${msg}`);
+        }
+      }
+      try {
+        await unlink(tempOutputPath);
+      } catch (unlinkError) {
+        const msg = unlinkError instanceof Error ? unlinkError.message : String(unlinkError);
+        console.error(`[ChromeSearchifyPrinter] unlink() failed during error cleanup: ${msg}`);
+      }
+      try {
+        await this.close();
+      } catch (closeError) {
+        const msg = closeError instanceof Error ? closeError.message : String(closeError);
+        console.error(`[ChromeSearchifyPrinter] close() failed during error cleanup: ${msg}`);
+      }
       throw error;
     }
   }
 
   async close(): Promise<void> {
-    if (this.browser) {
-      await this.browser.close().catch(() => undefined);
-      this.browser = null;
+    const errors: Error[] = [];
+
+    this.killProcessGroup();
+
+    const browser = this.browser;
+    this.browser = null;
+
+    if (browser) {
+      try {
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([
+          browser.close(),
+          new Promise<never>((_, reject) => {
+            timeoutId = setTimeout(
+              () =>
+                reject(
+                  new Error(
+                    `browser.close() timed out after ${BROWSER_CLOSE_TIMEOUT_MS}ms`,
+                  ),
+                ),
+              BROWSER_CLOSE_TIMEOUT_MS,
+            );
+          }),
+        ]);
+        if (timeoutId !== undefined) clearTimeout(timeoutId);
+      } catch (error) {
+        errors.push(error instanceof Error ? error : new Error(String(error)));
+      }
     }
+
+    const profileDir = this.profileDir;
+    this.profileDir = null;
+
+    if (profileDir) {
+      try {
+        await rm(profileDir, { recursive: true, force: true });
+      } catch (error) {
+        errors.push(error instanceof Error ? error : new Error(String(error)));
+      }
+    }
+
+    if (errors.length === 1) {
+      throw errors[0];
+    }
+    if (errors.length > 1) {
+      throw new AggregateError(
+        errors,
+        "ChromeSearchifyPrinter cleanup failed",
+      );
+    }
+  }
+
+  killProcessGroup(): void {
     if (this.chromeProcess) {
-      this.chromeProcess.kill();
+      try {
+        process.kill(-this.chromeProcess.pid!, "SIGKILL");
+      } catch {
+        this.chromeProcess.kill("SIGKILL");
+      }
       this.chromeProcess = null;
     }
-    if (this.profileDir) {
-      await rm(this.profileDir, { recursive: true, force: true }).catch(
-        () => undefined,
-      );
-      this.profileDir = null;
-    }
+  }
+
+  private createTempOutputPath(outputPath: string): string {
+    return join(
+      dirname(outputPath),
+      `.${basename(outputPath)}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`,
+    );
   }
 
   private async waitForSearchify(
@@ -241,21 +400,46 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
     return false;
   }
 
-  private async setupProfile(): Promise<string> {
+  private async setupProfile(verbose?: boolean): Promise<string> {
     const profileDir = await mkdtemp(join(tmpdir(), "chromium-ocr-"));
     const homeDir = process.env.HOME ?? "";
 
     const screenAiSrc = `${homeDir}/Library/Application Support/Google/Chrome/screen_ai`;
     const localStateSrc = `${homeDir}/Library/Application Support/Google/Chrome/Local State`;
 
-    await cp(screenAiSrc, `${profileDir}/screen_ai`, {
-      recursive: true,
-    }).catch(() => undefined);
-    await cp(localStateSrc, `${profileDir}/Local State`).catch(
-      () => undefined,
+    await this.copyOptionalProfileAsset(
+      screenAiSrc,
+      `${profileDir}/screen_ai`,
+      { recursive: true, verbose },
+    );
+    await this.copyOptionalProfileAsset(
+      localStateSrc,
+      `${profileDir}/Local State`,
+      { verbose },
     );
 
     return profileDir;
+  }
+
+  private async copyOptionalProfileAsset(
+    source: string,
+    destination: string,
+    options?: { recursive?: boolean; verbose?: boolean },
+  ): Promise<void> {
+    try {
+      if (options?.recursive) {
+        await cp(source, destination, { recursive: true });
+      } else {
+        await cp(source, destination);
+      }
+    } catch (error) {
+      if (options?.verbose) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(
+          `[ChromeSearchifyPrinter] Optional profile asset copy failed: ${source} -> ${destination}: ${message}`,
+        );
+      }
+    }
   }
 
   private waitForCdp(port: number): Promise<void> {

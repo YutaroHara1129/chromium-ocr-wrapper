@@ -13,6 +13,35 @@ import type { ConversionOptions } from "./types/index.js";
 const require = createRequire(import.meta.url);
 const pkgVersion = require("../package.json").version;
 
+type CliFlagDefinition = {
+  flags: string;
+  description: string;
+  hasValue: boolean;
+};
+
+export const CLI_FLAGS = [
+  {
+    flags: "-o, --output <path>",
+    description: "Output file or directory path",
+    hasValue: true,
+  },
+  {
+    flags: "--chrome-path <path>",
+    description: "Path to Chrome/Chromium executable",
+    hasValue: true,
+  },
+  {
+    flags: "--overwrite",
+    description: "Overwrite existing output files",
+    hasValue: false,
+  },
+  {
+    flags: "-v, --verbose",
+    description: "Enable verbose logging",
+    hasValue: false,
+  },
+] as const satisfies readonly CliFlagDefinition[];
+
 export async function runCli(argv: string[]): Promise<void> {
   const program = new Command();
   program.exitOverride();
@@ -23,12 +52,13 @@ export async function runCli(argv: string[]): Promise<void> {
       "Convert image-only PDFs to searchable PDFs using Chrome's built-in OCR (PDFSearchify)",
     )
     .version(pkgVersion)
-    .argument("<input>", "Input PDF file path or glob pattern")
-    .option("-o, --output <path>", "Output file or directory path")
-    .option("--chrome-path <path>", "Path to Chrome/Chromium executable")
-    .option("--overwrite", "Overwrite existing output files")
-    .option("-v, --verbose", "Enable verbose logging")
-    .action(async (input: string, options: Record<string, unknown>) => {
+    .argument("<input>", "Input PDF file path or glob pattern");
+
+  for (const flag of CLI_FLAGS) {
+    program.option(flag.flags, flag.description);
+  }
+
+  program.action(async (input: string, options: Record<string, unknown>) => {
       const files = await resolveInputFiles(input);
 
       if (files.length === 0) {
@@ -53,10 +83,12 @@ export async function runCli(argv: string[]): Promise<void> {
         await searchifyPrinter.close();
       };
 
-      const onSigint = (): void => void cleanup();
-      const onSigterm = (): void => void cleanup();
-      process.once("SIGINT", onSigint);
-      process.once("SIGTERM", onSigterm);
+      const onSignal = (): void => {
+        searchifyPrinter.killProcessGroup();
+        process.exitCode = 130;
+      };
+      process.once("SIGINT", onSignal);
+      process.once("SIGTERM", onSignal);
 
       try {
         for (const file of files) {
@@ -85,8 +117,8 @@ export async function runCli(argv: string[]): Promise<void> {
           }
         }
       } finally {
-        process.removeListener("SIGINT", onSigint);
-        process.removeListener("SIGTERM", onSigterm);
+        process.removeListener("SIGINT", onSignal);
+        process.removeListener("SIGTERM", onSignal);
         await cleanup();
       }
     });

@@ -39,26 +39,26 @@ export class ConversionPipeline implements IConversionPipeline {
       }
     }
 
-    const pdfBytes = await this.pdfInfoExtractor.readPdfBytes(
+    const { pageCount } = await this.pdfInfoExtractor.getMetadataFromFile(
       options.inputPath,
     );
-    const metadata = await this.pdfInfoExtractor.getMetadata(pdfBytes);
 
-    const searchifiedBytes = await this.searchifyPrinter.searchify(
+    await this.searchifyPrinter.searchifyToFile(
       options.inputPath,
+      outputPath,
       {
         chromePath: options.chromePath,
         verbose: options.verbose,
       },
     );
 
-    await this.fileWriter.writeFile(outputPath, searchifiedBytes);
+    const outputStats = await stat(outputPath);
 
     return {
       inputPath: options.inputPath,
       outputPath,
-      pageCount: metadata.pageCount,
-      textSize: searchifiedBytes.length,
+      pageCount,
+      textSize: outputStats.size,
     };
   }
 

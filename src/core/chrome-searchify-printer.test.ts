@@ -4,11 +4,13 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   return {
     ...actual,
+    copyFile: vi.fn(),
     cp: vi.fn(),
     mkdtemp: vi.fn(),
-    readFile: vi.fn(),
+    rename: vi.fn(),
     rm: vi.fn(),
     stat: vi.fn(),
+    unlink: vi.fn(),
   };
 });
 
@@ -22,8 +24,13 @@ vi.mock("playwright-core", () => ({
   },
 }));
 
+vi.mock("../utils/upload-server.js", () => ({
+  createUploadServer: vi.fn(),
+}));
+
 import { spawn } from "node:child_process";
-import { cp, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { createUploadServer } from "../utils/upload-server.js";
+import { copyFile, cp, mkdtemp, rename, rm, stat, unlink } from "node:fs/promises";
 import { chromium } from "playwright-core";
 import { ChromeSearchifyPrinter } from "./chrome-searchify-printer.js";
 
@@ -57,39 +64,84 @@ function createViewerFrame(options?: {
     hasSearchifyText: boolean;
     pdfSearchifySaveEnabled: boolean;
   }>;
-  saveResult?: { dataToSave: number[]; fileName: string } | null;
+  uploadResult?: Record<string, unknown>;
 }): MockViewerFrame {
   const readyChecks = options?.readyChecks ?? [
     { hasSearchifyText: true, pdfSearchifySaveEnabled: true },
   ];
+  const uploadResult = options?.uploadResult ?? {
+    uploaded: false,
+    reason: "NO_DATA",
+  };
 
-  let call = 0;
+  let readyCall = 0;
   const frame: MockViewerFrame = {
-    evaluate: vi.fn().mockImplementation(async () => {
-      call += 1;
-
-      if (call <= readyChecks.length) {
-        return readyChecks[call - 1];
+    evaluate: vi.fn().mockImplementation(async (fnOrValue: unknown, _paramsOrFlag?: unknown) => {
+      if (typeof fnOrValue !== "function") {
+        return undefined;
       }
 
-      return options?.saveResult !== undefined
-        ? options.saveResult
-        : {
-            dataToSave: [1, 2, 3, 4],
-            fileName: "searchified.pdf",
-          };
+      const fnString = fnOrValue.toString();
+      if (fnString.includes("hasSearchifyText_")) {
+        readyCall++;
+        return readyCall <= readyChecks.length
+          ? readyChecks[readyCall - 1]
+          : { hasSearchifyText: false, pdfSearchifySaveEnabled: false };
+      }
+
+      return uploadResult;
     }),
   };
 
   return frame;
 }
 
+function createExecutingViewerFrame(options: {
+  saveResult?: { dataToSave: ArrayBuffer; fileName: string } | null;
+  uploadError?: Error;
+}): MockViewerFrame {
+  const frame = createViewerFrame();
+
+  frame.evaluate.mockImplementation(async (fn: unknown, params?: unknown) => {
+    if (typeof fn !== "function") return undefined;
+
+    const fnString = fn.toString();
+    if (fnString.includes("hasSearchifyText_")) {
+      return { hasSearchifyText: true, pdfSearchifySaveEnabled: true };
+    }
+
+    const originalViewer = (globalThis as Record<string, unknown>)["viewer"];
+    const originalFetch = globalThis.fetch;
+
+    try {
+      (globalThis as Record<string, unknown>)["viewer"] = {
+        currentController: {
+          handlePluginMessage_: vi.fn(),
+          save: vi.fn().mockResolvedValue(
+            options.saveResult ?? {
+              dataToSave: new Uint8Array([1, 2, 3]).buffer,
+              fileName: "saved.pdf",
+            },
+          ),
+        },
+      };
+
+      vi.spyOn(globalThis, "fetch").mockRejectedValue(
+        options.uploadError ?? new TypeError("Failed to fetch"),
+      );
+
+      return await (fn as (p: unknown) => Promise<unknown>)(params);
+    } finally {
+      (globalThis as Record<string, unknown>)["viewer"] = originalViewer;
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  return frame;
+}
+
 function createPage(viewerFrame?: MockViewerFrame): { page: MockPage; frame: MockViewerFrame } {
-  const frame =
-    viewerFrame ??
-    createViewerFrame({
-      saveResult: { dataToSave: [1, 2, 3, 4], fileName: "searchified.pdf" },
-    });
+  const frame = viewerFrame ?? createViewerFrame();
 
   const page: MockPage = {
     goto: vi.fn().mockResolvedValue(undefined),
@@ -118,6 +170,10 @@ function mockProfile(profileDir = "/tmp/chromium-ocr-test-profile"): void {
   vi.mocked(mkdtemp).mockResolvedValue(profileDir);
   vi.mocked(cp).mockResolvedValue(undefined);
   vi.mocked(rm).mockResolvedValue(undefined);
+  vi.mocked(rename).mockResolvedValue(undefined);
+  vi.mocked(unlink).mockResolvedValue(undefined);
+  vi.mocked(copyFile).mockResolvedValue(undefined);
+  vi.mocked(stat).mockResolvedValue({ size: 1234 } as never);
 }
 
 function mockChromeFound(): void {
@@ -132,6 +188,14 @@ function mockFetchHealthy(): void {
   vi.spyOn(globalThis, "fetch").mockResolvedValue({ ok: true } as Response);
 }
 
+function mockUploadServer(): void {
+  vi.mocked(createUploadServer).mockResolvedValue({
+    url: "http://127.0.0.1:54321/upload?token=test-token",
+    done: Promise.resolve(1234),
+    close: vi.fn().mockResolvedValue(undefined),
+  });
+}
+
 function mockSearchifyRuntime(options?: {
   chromePath?: string;
   viewerFrame?: MockViewerFrame;
@@ -141,6 +205,7 @@ function mockSearchifyRuntime(options?: {
 }): { chromeProcess: ReturnType<typeof createChromeProcess>; page: MockPage; frame: MockViewerFrame; browser: MockBrowser } {
   mockProfile();
   mockFetchHealthy();
+  mockUploadServer();
 
   if (!options?.chromePath) {
     mockChromeFound();
@@ -210,7 +275,7 @@ describe("ChromeSearchifyPrinter", () => {
   it("spawns Chrome with required PDFSearchify flags", async () => {
     mockSearchifyRuntime({ chromePath: "/custom/chrome" });
 
-    await printer.searchify("/tmp/input.pdf", {
+    await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
       chromePath: "/custom/chrome",
     });
 
@@ -226,14 +291,14 @@ describe("ChromeSearchifyPrinter", () => {
         "--disable-gpu",
         "--headless=new",
       ]),
-      { stdio: ["ignore", "pipe", "pipe"], detached: false },
+      { stdio: ["ignore", "pipe", "pipe"], detached: true },
     );
   });
 
   it("uses provided chromePath instead of auto-discovery", async () => {
     mockSearchifyRuntime({ chromePath: "/provided/chrome" });
 
-    await printer.searchify("/tmp/input.pdf", {
+    await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
       chromePath: "/provided/chrome",
     });
 
@@ -247,7 +312,9 @@ describe("ChromeSearchifyPrinter", () => {
   it("throws clear error when Chrome cannot be found", async () => {
     mockChromeNotFound();
 
-    await expect(printer.searchify("/tmp/input.pdf")).rejects.toThrow(
+    await expect(
+      printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf"),
+    ).rejects.toThrow(
       "Chrome/Chromium not found. Please specify --chrome-path.",
     );
 
@@ -257,6 +324,7 @@ describe("ChromeSearchifyPrinter", () => {
   it("finds Chrome from default platform paths when chromePath is not provided", async () => {
     mockProfile();
     mockFetchHealthy();
+    mockUploadServer();
 
     const platformChromePaths: Record<string, string[]> = {
       darwin: [
@@ -291,7 +359,7 @@ describe("ChromeSearchifyPrinter", () => {
     const { browser } = createBrowser(page);
     vi.mocked(chromium.connectOverCDP).mockResolvedValue(browser as never);
 
-    await printer.searchify("/tmp/input.pdf");
+    await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf");
 
     expect(stat).toHaveBeenNthCalledWith(1, paths[0]);
     expect(stat).toHaveBeenNthCalledWith(2, paths[1]);
@@ -309,7 +377,7 @@ describe("ChromeSearchifyPrinter", () => {
     try {
       mockSearchifyRuntime({ chromePath: "/custom/chrome" });
 
-      await printer.searchify("/tmp/input.pdf", {
+      await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
         chromePath: "/custom/chrome",
       });
 
@@ -333,6 +401,7 @@ describe("ChromeSearchifyPrinter", () => {
       .mockResolvedValue({ ok: true } as Response);
 
     mockProfile();
+    mockUploadServer();
     const chromeProcess = createChromeProcess();
     vi.mocked(spawn).mockReturnValue(chromeProcess as never);
 
@@ -340,7 +409,7 @@ describe("ChromeSearchifyPrinter", () => {
     const { browser } = createBrowser(page);
     vi.mocked(chromium.connectOverCDP).mockResolvedValue(browser as never);
 
-    await printer.searchify("/tmp/input.pdf", {
+    await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
       chromePath: "/custom/chrome",
     });
 
@@ -356,7 +425,7 @@ describe("ChromeSearchifyPrinter", () => {
   it("spawns Chrome with --headless=new to suppress download UI", async () => {
     mockSearchifyRuntime({ chromePath: "/custom/chrome" });
 
-    await printer.searchify("/tmp/input.pdf", {
+    await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
       chromePath: "/custom/chrome",
     });
 
@@ -378,7 +447,7 @@ describe("ChromeSearchifyPrinter", () => {
     const chromeProcess = createChromeProcess();
     vi.mocked(spawn).mockReturnValue(chromeProcess as never);
 
-    const promise = printer.searchify("/tmp/input.pdf", {
+    const promise = printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
       chromePath: "/custom/chrome",
     });
     promise.catch(() => {});
@@ -414,7 +483,7 @@ describe("ChromeSearchifyPrinter", () => {
     });
 
     await expect(
-      printer.searchify("/tmp/input.pdf", { chromePath: "/custom/chrome" }),
+      printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", { chromePath: "/custom/chrome" }),
     ).rejects.toThrow("PDF viewer frame not found");
 
     expect(pageBundle.page.close).toHaveBeenCalled();
@@ -426,123 +495,20 @@ describe("ChromeSearchifyPrinter", () => {
     });
   });
 
-  it("waits for searchify and saves SEARCHIFIED result bytes", async () => {
-    const viewerFrame = createViewerFrame({
-      readyChecks: [
-        { hasSearchifyText: false, pdfSearchifySaveEnabled: true },
-        { hasSearchifyText: true, pdfSearchifySaveEnabled: true },
-      ],
-      saveResult: {
-        dataToSave: [9, 8, 7],
-        fileName: "searchified.pdf",
-      },
-    });
+  it("renames temp file to output after fallback copy", async () => {
+    mockSearchifyRuntime({ chromePath: "/custom/chrome" });
 
-    mockSearchifyRuntime({
-      chromePath: "/custom/chrome",
-      viewerFrame,
-    });
-
-    const result = await printer.searchify("/tmp/input.pdf", {
+    await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
       chromePath: "/custom/chrome",
     });
 
-    expect(Array.from(result)).toEqual([9, 8, 7]);
-    expect(viewerFrame.evaluate).toHaveBeenCalledTimes(3);
-    expect(viewerFrame.evaluate).toHaveBeenLastCalledWith(
-      expect.any(Function),
-      true,
+    expect(copyFile).toHaveBeenCalledWith(
+      "/tmp/input.pdf",
+      expect.stringContaining(".output.pdf."),
     );
-  });
-
-  it("falls back to ORIGINAL when SEARCHIFIED save returns null", async () => {
-    const viewerFrame = createViewerFrame({
-      readyChecks: [
-        { hasSearchifyText: true, pdfSearchifySaveEnabled: true },
-      ],
-      saveResult: {
-        dataToSave: [5, 4, 3],
-        fileName: "original.pdf",
-      },
-    });
-
-    mockSearchifyRuntime({
-      chromePath: "/custom/chrome",
-      viewerFrame,
-    });
-
-    const result = await printer.searchify("/tmp/input.pdf", {
-      chromePath: "/custom/chrome",
-    });
-
-    expect(Array.from(result)).toEqual([5, 4, 3]);
-    expect(viewerFrame.evaluate).toHaveBeenCalledTimes(2);
-    expect(viewerFrame.evaluate).toHaveBeenLastCalledWith(
-      expect.any(Function),
-      true,
-    );
-  });
-
-  it("falls back to reading original input file when save returns no data", async () => {
-    vi.mocked(readFile).mockResolvedValue(Buffer.from([6, 6, 6]) as never);
-
-    const viewerFrame = createViewerFrame({
-      readyChecks: [
-        { hasSearchifyText: true, pdfSearchifySaveEnabled: true },
-      ],
-      saveResult: null,
-    });
-
-    mockSearchifyRuntime({
-      chromePath: "/custom/chrome",
-      viewerFrame,
-    });
-
-    const result = await printer.searchify("/tmp/input.pdf", {
-      chromePath: "/custom/chrome",
-    });
-
-    expect(readFile).toHaveBeenCalledWith("/tmp/input.pdf");
-    expect(Array.from(result)).toEqual([6, 6, 6]);
-    expect(viewerFrame.evaluate).toHaveBeenLastCalledWith(
-      expect.any(Function),
-      true,
-    );
-  });
-
-  it("returns save result bytes when searchify readiness is never detected", async () => {
-    vi.useFakeTimers();
-
-    const viewerFrame = createViewerFrame({
-      readyChecks: Array.from({ length: 10 }, () => ({
-        hasSearchifyText: false,
-        pdfSearchifySaveEnabled: true,
-      })),
-      saveResult: {
-        dataToSave: [1, 1, 1],
-        fileName: "original.pdf",
-      },
-    });
-
-    mockSearchifyRuntime({
-      chromePath: "/custom/chrome",
-      viewerFrame,
-    });
-
-    const promise = printer.searchify("/tmp/input.pdf", {
-      chromePath: "/custom/chrome",
-    });
-    promise.catch(() => {});
-
-    await advanceUntilSettled(promise, 15_000);
-
-    const result = await promise;
-
-    expect(Array.from(result)).toEqual([1, 1, 1]);
-    expect(viewerFrame.evaluate).toHaveBeenCalledTimes(11);
-    expect(viewerFrame.evaluate).toHaveBeenLastCalledWith(
-      expect.any(Function),
-      false,
+    expect(rename).toHaveBeenCalledWith(
+      expect.stringContaining(".output.pdf."),
+      "/tmp/output.pdf",
     );
   });
 
@@ -550,7 +516,7 @@ describe("ChromeSearchifyPrinter", () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     mockSearchifyRuntime({ chromePath: "/custom/chrome" });
 
-    await printer.searchify("/tmp/input.pdf", {
+    await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
       chromePath: "/custom/chrome",
       verbose: true,
     });
@@ -575,7 +541,7 @@ describe("ChromeSearchifyPrinter", () => {
       chromePath: "/custom/chrome",
     });
 
-    await printer.searchify("/tmp/input.pdf", {
+    await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
       chromePath: "/custom/chrome",
     });
 
@@ -587,12 +553,13 @@ describe("ChromeSearchifyPrinter", () => {
     expect(rm).toHaveBeenCalledTimes(1);
   });
 
-  it("close() ignores browser.close() and rm() failures", async () => {
+  it("close() propagates browser.close() and rm() failures", async () => {
     const { page } = createPage();
     const { browser } = createBrowser(page);
     browser.close.mockRejectedValue(new Error("browser close failed"));
 
     mockProfile();
+    mockUploadServer();
     vi.mocked(rm).mockRejectedValue(new Error("rm failed"));
     mockFetchHealthy();
 
@@ -600,14 +567,18 @@ describe("ChromeSearchifyPrinter", () => {
     vi.mocked(spawn).mockReturnValue(chromeProcess as never);
     vi.mocked(chromium.connectOverCDP).mockResolvedValue(browser as never);
 
-    await printer.searchify("/tmp/input.pdf", {
+    await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
       chromePath: "/custom/chrome",
     });
 
-    await expect(printer.close()).resolves.toBeUndefined();
+    await expect(printer.close()).rejects.toSatisfy((err: unknown) => {
+      if (!(err instanceof AggregateError)) return false;
+      return err.errors.some((e) => e.message.includes("browser close failed"))
+        && err.errors.some((e) => e.message.includes("rm failed"));
+    });
   });
 
-  it("searchify cleans up resources when connectOverCDP fails", async () => {
+  it("searchifyToFile cleans up resources when connectOverCDP fails", async () => {
     mockProfile();
     mockFetchHealthy();
 
@@ -618,7 +589,7 @@ describe("ChromeSearchifyPrinter", () => {
     );
 
     await expect(
-      printer.searchify("/tmp/input.pdf", { chromePath: "/custom/chrome" }),
+      printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", { chromePath: "/custom/chrome" }),
     ).rejects.toThrow("CDP connect failed");
 
     expect(chromeProcess.kill).toHaveBeenCalled();
@@ -628,7 +599,7 @@ describe("ChromeSearchifyPrinter", () => {
     });
   });
 
-  it("searchify cleans up resources when page.goto fails", async () => {
+  it("searchifyToFile cleans up resources when page.goto fails", async () => {
     const pageBundle = createPage();
     pageBundle.page.goto.mockRejectedValue(new Error("goto failed"));
 
@@ -640,7 +611,7 @@ describe("ChromeSearchifyPrinter", () => {
     });
 
     await expect(
-      printer.searchify("/tmp/input.pdf", { chromePath: "/custom/chrome" }),
+      printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", { chromePath: "/custom/chrome" }),
     ).rejects.toThrow("goto failed");
 
     expect(browser.close).toHaveBeenCalled();
@@ -649,5 +620,280 @@ describe("ChromeSearchifyPrinter", () => {
       recursive: true,
       force: true,
     });
+  });
+
+  it("evaluate callback uses Blob and fetch, not Array.from(Uint8Array)", async () => {
+    let capturedFunction: string = "";
+    const viewerFrame = createViewerFrame();
+    viewerFrame.evaluate.mockImplementation(async (fn: unknown) => {
+      if (typeof fn !== "function") return undefined;
+      const fnString = fn.toString();
+      if (fnString.includes("hasSearchifyText_")) {
+        return { hasSearchifyText: true, pdfSearchifySaveEnabled: true };
+      }
+      capturedFunction = fnString;
+      return { uploaded: false, reason: "NO_DATA" };
+    });
+
+    mockSearchifyRuntime({
+      chromePath: "/custom/chrome",
+      viewerFrame,
+    });
+
+    await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+      chromePath: "/custom/chrome",
+    });
+
+    expect(capturedFunction).toContain("Blob");
+    expect(capturedFunction).toContain("fetch");
+    expect(capturedFunction).toContain("POST");
+    expect(capturedFunction).not.toContain("Array.from");
+  });
+
+  it("delegates to createUploadServer with temp output path", async () => {
+    mockSearchifyRuntime({ chromePath: "/custom/chrome" });
+
+    await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+      chromePath: "/custom/chrome",
+      uploadTimeoutMs: 4567,
+    });
+
+    expect(createUploadServer).toHaveBeenCalledWith(
+      expect.stringContaining(".output.pdf."),
+      4567,
+    );
+  });
+
+  it("propagates browser upload fetch failures instead of falling back to NO_DATA", async () => {
+    const viewerFrame = createExecutingViewerFrame({
+      uploadError: new TypeError("Failed to fetch"),
+    });
+
+    const { browser, chromeProcess } = mockSearchifyRuntime({
+      chromePath: "/custom/chrome",
+      viewerFrame,
+    });
+
+    await expect(
+      printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+        chromePath: "/custom/chrome",
+      }),
+    ).rejects.toThrow("Failed to fetch");
+
+    expect(copyFile).not.toHaveBeenCalled();
+    expect(rename).not.toHaveBeenCalled();
+    expect(browser.close).toHaveBeenCalled();
+    expect(chromeProcess.kill).toHaveBeenCalled();
+  });
+
+  it("propagates ORIGINAL path upload failures when SEARCHIFIED save returns null", async () => {
+    const callCount = { value: 0 };
+    const viewerFrame = createViewerFrame();
+    viewerFrame.evaluate.mockImplementation(async (fn: unknown, params?: unknown) => {
+      if (typeof fn !== "function") return undefined;
+
+      const fnString = fn.toString();
+      if (fnString.includes("hasSearchifyText_")) {
+        return { hasSearchifyText: true, pdfSearchifySaveEnabled: true };
+      }
+
+      const originalViewer = (globalThis as Record<string, unknown>)["viewer"];
+      const originalFetch = globalThis.fetch;
+
+      try {
+        callCount.value++;
+        (globalThis as Record<string, unknown>)["viewer"] = {
+          currentController: {
+            handlePluginMessage_: vi.fn(),
+            save: vi.fn().mockImplementation((saveType: string) => {
+              if (saveType === "SEARCHIFIED") return Promise.resolve(null);
+              return Promise.resolve({
+                dataToSave: new Uint8Array([1, 2, 3]).buffer,
+                fileName: "original.pdf",
+              });
+            }),
+          },
+        };
+
+        vi.spyOn(globalThis, "fetch").mockRejectedValue(
+          new TypeError("NetworkError when attempting to fetch resource"),
+        );
+
+        return await (fn as (p: unknown) => Promise<unknown>)(params);
+      } finally {
+        (globalThis as Record<string, unknown>)["viewer"] = originalViewer;
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    const { browser, chromeProcess } = mockSearchifyRuntime({
+      chromePath: "/custom/chrome",
+      viewerFrame,
+    });
+
+    await expect(
+      printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+        chromePath: "/custom/chrome",
+      }),
+    ).rejects.toThrow("NetworkError when attempting to fetch resource");
+
+    expect(copyFile).not.toHaveBeenCalled();
+    expect(rename).not.toHaveBeenCalled();
+    expect(browser.close).toHaveBeenCalled();
+    expect(chromeProcess.kill).toHaveBeenCalled();
+  });
+
+  it("propagates upload server close failure after successful upload", async () => {
+    const viewerFrame = createViewerFrame({
+      uploadResult: {
+        uploaded: true,
+        fileName: "saved.pdf",
+        byteLength: 1234,
+        saveType: "SEARCHIFIED" as const,
+      },
+    });
+
+    const uploadServerClose = vi
+      .fn()
+      .mockRejectedValue(new Error("upload server close failed"));
+
+    mockProfile();
+    mockFetchHealthy();
+    vi.mocked(createUploadServer).mockResolvedValue({
+      url: "http://127.0.0.1:54321/upload?token=test-token",
+      done: Promise.resolve(1234),
+      close: uploadServerClose,
+    });
+
+    const chromeProcess = createChromeProcess();
+    vi.mocked(spawn).mockReturnValue(chromeProcess as never);
+    const { page } = createPage(viewerFrame);
+    const { browser } = createBrowser(page);
+    vi.mocked(chromium.connectOverCDP).mockResolvedValue(browser as never);
+
+    await expect(
+      printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+        chromePath: "/custom/chrome",
+      }),
+    ).rejects.toThrow("upload server close failed");
+
+    expect(uploadServerClose).toHaveBeenCalled();
+    expect(rename).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves primary error when cleanup also fails", async () => {
+    const pageBundle = createPage();
+    pageBundle.page.goto.mockRejectedValue(new Error("goto failed"));
+    pageBundle.page.close.mockRejectedValue(new Error("page close failed"));
+
+    mockProfile();
+    const uploadServerClose = vi
+      .fn()
+      .mockRejectedValue(new Error("upload server close failed"));
+    vi.mocked(createUploadServer).mockResolvedValue({
+      url: "http://127.0.0.1:54321/upload?token=test-token",
+      done: Promise.resolve(1234),
+      close: uploadServerClose,
+    });
+    vi.mocked(unlink).mockRejectedValue(new Error("unlink failed"));
+    mockFetchHealthy();
+
+    const chromeProcess = createChromeProcess();
+    vi.mocked(spawn).mockReturnValue(chromeProcess as never);
+    const { browser } = createBrowser(pageBundle.page);
+    browser.close.mockRejectedValue(new Error("browser close failed"));
+    vi.mocked(rm).mockRejectedValue(new Error("rm failed"));
+    vi.mocked(chromium.connectOverCDP).mockResolvedValue(browser as never);
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(
+      printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+        chromePath: "/custom/chrome",
+      }),
+    ).rejects.toThrow("goto failed");
+
+    expect(pageBundle.page.close).toHaveBeenCalled();
+    expect(uploadServerClose).not.toHaveBeenCalled();
+    expect(unlink).toHaveBeenCalled();
+    expect(browser.close).toHaveBeenCalled();
+    expect(chromeProcess.kill).toHaveBeenCalled();
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("page close failed"),
+    );
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("unlink failed"),
+    );
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("close() failed during error cleanup"),
+    );
+  });
+
+  it("close() rejects when browser.close() times out", async () => {
+    const { page } = createPage();
+    const { browser } = createBrowser(page);
+    browser.close.mockReturnValue(new Promise(() => {}));
+
+    mockProfile();
+    mockUploadServer();
+    mockFetchHealthy();
+
+    const chromeProcess = createChromeProcess();
+    vi.mocked(spawn).mockReturnValue(chromeProcess as never);
+    vi.mocked(chromium.connectOverCDP).mockResolvedValue(browser as never);
+
+    await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+      chromePath: "/custom/chrome",
+    });
+
+    vi.useFakeTimers();
+    const closePromise = printer.close();
+    closePromise.catch(() => {});
+    await vi.advanceTimersByTimeAsync(5_100);
+    await expect(closePromise).rejects.toThrow(
+      "browser.close() timed out after 5000ms",
+    );
+    vi.useRealTimers();
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+
+  it("logs optional Screen AI profile copy failures in verbose mode", async () => {
+    const originalHome = process.env.HOME;
+    process.env.HOME = "/Users/tester";
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    mockFetchHealthy();
+    mockUploadServer();
+
+    const chromeProcess = createChromeProcess();
+    vi.mocked(spawn).mockReturnValue(chromeProcess as never);
+    const { page } = createPage();
+    const { browser } = createBrowser(page);
+    vi.mocked(chromium.connectOverCDP).mockResolvedValue(browser as never);
+
+    vi.mocked(cp).mockImplementation(async (src: string) => {
+      if (typeof src === "string" && src.includes("screen_ai")) {
+        throw new Error("screen_ai not found");
+      }
+      if (typeof src === "string" && src.includes("Local State")) {
+        throw new Error("Local State not found");
+      }
+      return undefined;
+    });
+    vi.mocked(mkdtemp).mockResolvedValue("/tmp/chromium-ocr-test-profile");
+    vi.mocked(stat).mockResolvedValue({} as never);
+
+    await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+      chromePath: "/custom/chrome",
+      verbose: true,
+    });
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Optional profile asset copy failed"),
+    );
+
+    process.env.HOME = originalHome;
   });
 });
