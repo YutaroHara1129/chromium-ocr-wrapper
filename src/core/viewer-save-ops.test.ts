@@ -1,9 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  saveAndUpload,
-  type SaveAndUploadParams,
-  type SaveUploadResult,
-} from "./viewer-save-ops.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { saveAndUpload } from "./viewer-save-ops.js";
 
 function setupGlobalViewer(options?: {
   saveResult?: { dataToSave: ArrayBuffer; fileName: string } | null;
