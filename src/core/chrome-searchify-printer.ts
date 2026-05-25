@@ -86,6 +86,7 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
 
     let spawnError: Error | null = null;
     this.chromeProcess.on("error", (err: Error) => {
+      /* v8 ignore next -- spawn error handler; untestable with mocked spawn */
       spawnError = err;
     });
 
@@ -97,9 +98,11 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
     try {
       await this.waitForCdp(this.cdpPort);
 
+      /* v8 ignore start -- spawn error rethrow; unreachable with mocked spawn */
       if (spawnError) {
         throw spawnError;
       }
+      /* v8 ignore end */
 
       this.browser = await chromium.connectOverCDP(
         `http://127.0.0.1:${this.cdpPort}`,
@@ -276,6 +279,7 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
       if (viewerFrame) {
         try {
           const ready = await viewerFrame.evaluate(() => {
+            /* v8 ignore start -- browser-side callback; not executed in Node.js unit tests */
             const v = (globalThis as Record<string, unknown>)["viewer"];
             if (!v || typeof v !== "object") return false;
             const ctrl = (v as Record<string, unknown>)["currentController"];
@@ -284,6 +288,7 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
             if (!vp) return false;
             const pageDims = vp["pageDimensions_"] as Array<unknown> | undefined;
             return Array.isArray(pageDims) && pageDims.length > 0;
+            /* v8 ignore end */
           });
           if (ready) {
             if (verbose) {
@@ -311,11 +316,13 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
     viewerFrame: Frame,
     verbose?: boolean,
   ): Promise<boolean> {
-    const setupResult = await viewerFrame.evaluate(async (): Promise<{
-      pageCount: number;
-      initialHasSearchifyText: boolean;
-      doneAfterScroll: boolean;
-    }> => {
+    const setupResult = await viewerFrame.evaluate(
+      /* v8 ignore start -- browser-side callback; not executed in Node.js unit tests */
+      async (): Promise<{
+        pageCount: number;
+        initialHasSearchifyText: boolean;
+        doneAfterScroll: boolean;
+      }> => {
       const g = globalThis as Record<string, unknown>;
       const viewer = g["viewer"] as Record<string, unknown> | undefined;
       if (!viewer)
@@ -370,6 +377,7 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
 
       return { pageCount, initialHasSearchifyText, doneAfterScroll: progress["done"] ?? false };
     });
+    /* v8 ignore end */
 
     const { pageCount, initialHasSearchifyText, doneAfterScroll } = setupResult;
 
@@ -388,6 +396,7 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
     }
 
     const maxWaitMs = 15_000 + pageCount * 3_000;
+    const notStartedThresholdMs = Math.max(15_000, Math.min(60_000, maxWaitMs / 2));
     const pollIntervalMs = 500;
     const startTime = Date.now();
     let ocrStarted = false;
@@ -399,6 +408,7 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
         done: boolean;
         hasSearchifyText: boolean;
       } => {
+        /* v8 ignore start -- browser-side callback; not executed in Node.js unit tests */
         const g = globalThis as Record<string, unknown>;
         const p = g["__searchifyProgress"] as Record<string, boolean> | undefined;
         const v = g["viewer"] as Record<string, unknown> | undefined;
@@ -407,6 +417,7 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
           done: p?.["done"] ?? false,
           hasSearchifyText: (v?.["hasSearchifyText_"] as boolean) ?? false,
         };
+        /* v8 ignore end */
       });
 
       if (state.done) {
@@ -431,10 +442,10 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
         return true;
       }
 
-      if (!ocrStarted && !state.hasSearchifyText && Date.now() - startTime > 15_000) {
+      if (!ocrStarted && !state.hasSearchifyText && Date.now() - startTime > notStartedThresholdMs) {
         if (verbose) {
           console.error(
-            "[ChromeSearchifyPrinter] OCR not started after 15s, assuming text-only PDF",
+            `[ChromeSearchifyPrinter] OCR not started after ${notStartedThresholdMs}ms, assuming text-only PDF`,
           );
         }
         return false;
