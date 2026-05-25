@@ -33,6 +33,7 @@ import { createUploadServer } from "../utils/upload-server.js";
 import { copyFile, cp, mkdtemp, rename, rm, stat, unlink } from "node:fs/promises";
 import { chromium } from "playwright-core";
 import { ChromeSearchifyPrinter } from "./chrome-searchify-printer.js";
+import { saveAndUpload } from "./viewer-save-ops.js";
 
 type MockViewerFrame = {
   evaluate: ReturnType<typeof vi.fn>;
@@ -59,89 +60,89 @@ function createChromeProcess(): { on: ReturnType<typeof vi.fn>; stderr: { on: Re
   };
 }
 
-function createViewerFrame(options?: {
-  readyChecks?: Array<{
-    hasSearchifyText: boolean;
-    pdfSearchifySaveEnabled: boolean;
-  }>;
-  uploadResult?: Record<string, unknown>;
-}): MockViewerFrame {
-  const readyChecks = options?.readyChecks ?? [
-    { hasSearchifyText: true, pdfSearchifySaveEnabled: true },
-  ];
-  const uploadResult = options?.uploadResult ?? {
-    uploaded: false,
-    reason: "NO_DATA",
-  };
+type ViewerSimulationOptions = {
+  pageCount?: number;
+  hasSearchifyText?: boolean;
+  progressDoneAfterSetup?: boolean;
+  saveMock?: ReturnType<typeof vi.fn>;
+  uploadMock?: ReturnType<typeof vi.fn>;
+};
 
-  let readyCall = 0;
+function createSimulatedViewerFrame(
+  options?: ViewerSimulationOptions,
+): MockViewerFrame {
+  const pageCount = options?.pageCount ?? 3;
+  const hasSearchifyText = options?.hasSearchifyText ?? true;
+  const progressDoneAfterSetup = options?.progressDoneAfterSetup ?? false;
+
+  const saveMock =
+    options?.saveMock ??
+    vi.fn().mockResolvedValue({
+      dataToSave: new Uint8Array([1, 2, 3]).buffer,
+      fileName: "saved.pdf",
+    });
+
+  const uploadMock =
+    options?.uploadMock ?? vi.fn().mockResolvedValue({ ok: true } as Response);
+
+  let searchifySetupCall = 0;
+
   const frame: MockViewerFrame = {
-    evaluate: vi.fn().mockImplementation(async (fnOrValue: unknown, _paramsOrFlag?: unknown) => {
-      if (typeof fnOrValue !== "function") {
-        return undefined;
+    evaluate: vi.fn().mockImplementation(async (fn: unknown, params?: unknown) => {
+      if (typeof fn !== "function") return undefined;
+
+      if (fn === saveAndUpload) {
+        const g = globalThis as Record<string, unknown>;
+        const prevViewer = g["viewer"];
+        const prevFetch = globalThis.fetch;
+
+        try {
+          g["viewer"] = {
+            currentController: {
+              handlePluginMessage_: vi.fn(),
+              save: saveMock,
+            },
+          };
+          vi.spyOn(globalThis, "fetch").mockImplementation(uploadMock);
+          return await (fn as (p: unknown) => Promise<unknown>)(params);
+        } finally {
+          g["viewer"] = prevViewer;
+          globalThis.fetch = prevFetch;
+        }
       }
 
-      const fnString = fnOrValue.toString();
-      if (fnString.includes("hasSearchifyText_")) {
-        readyCall++;
-        return readyCall <= readyChecks.length
-          ? readyChecks[readyCall - 1]
-          : { hasSearchifyText: false, pdfSearchifySaveEnabled: false };
+      const fnString = fn.toString();
+
+      if (fnString.includes("viewer") && fnString.includes("currentController") && !fnString.includes("__searchifyProgress")) {
+        return true;
       }
 
-      return uploadResult;
+      if (fnString.includes("__searchifyProgress") && fnString.includes("pageCount")) {
+        searchifySetupCall++;
+        return {
+          pageCount,
+          initialHasSearchifyText: hasSearchifyText,
+          doneAfterScroll: progressDoneAfterSetup || searchifySetupCall > 1,
+        };
+      }
+
+      if (fnString.includes("__searchifyProgress") && fnString.includes("started")) {
+        return {
+          started: true,
+          done: true,
+          hasSearchifyText,
+        };
+      }
+
+      return undefined;
     }),
   };
 
   return frame;
 }
 
-function createExecutingViewerFrame(options: {
-  saveResult?: { dataToSave: ArrayBuffer; fileName: string } | null;
-  uploadError?: Error;
-}): MockViewerFrame {
-  const frame = createViewerFrame();
-
-  frame.evaluate.mockImplementation(async (fn: unknown, params?: unknown) => {
-    if (typeof fn !== "function") return undefined;
-
-    const fnString = fn.toString();
-    if (fnString.includes("hasSearchifyText_")) {
-      return { hasSearchifyText: true, pdfSearchifySaveEnabled: true };
-    }
-
-    const originalViewer = (globalThis as Record<string, unknown>)["viewer"];
-    const originalFetch = globalThis.fetch;
-
-    try {
-      (globalThis as Record<string, unknown>)["viewer"] = {
-        currentController: {
-          handlePluginMessage_: vi.fn(),
-          save: vi.fn().mockResolvedValue(
-            options.saveResult ?? {
-              dataToSave: new Uint8Array([1, 2, 3]).buffer,
-              fileName: "saved.pdf",
-            },
-          ),
-        },
-      };
-
-      vi.spyOn(globalThis, "fetch").mockRejectedValue(
-        options.uploadError ?? new TypeError("Failed to fetch"),
-      );
-
-      return await (fn as (p: unknown) => Promise<unknown>)(params);
-    } finally {
-      (globalThis as Record<string, unknown>)["viewer"] = originalViewer;
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  return frame;
-}
-
 function createPage(viewerFrame?: MockViewerFrame): { page: MockPage; frame: MockViewerFrame } {
-  const frame = viewerFrame ?? createViewerFrame();
+  const frame = viewerFrame ?? createSimulatedViewerFrame();
 
   const page: MockPage = {
     goto: vi.fn().mockResolvedValue(undefined),
@@ -474,6 +475,8 @@ describe("ChromeSearchifyPrinter", () => {
   });
 
   it("throws when PDF viewer frame is missing and cleans up resources", async () => {
+    vi.useFakeTimers();
+
     const pageBundle = createPage();
     pageBundle.page.frames.mockReturnValue([{}]);
 
@@ -482,9 +485,12 @@ describe("ChromeSearchifyPrinter", () => {
       page: pageBundle.page,
     });
 
-    await expect(
-      printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", { chromePath: "/custom/chrome" }),
-    ).rejects.toThrow("PDF viewer frame not found");
+    const promise = printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", { chromePath: "/custom/chrome" });
+    promise.catch(() => {});
+
+    await advanceUntilSettled(promise, 20_000);
+
+    await expect(promise).rejects.toThrow("PDF viewer frame not found within 15 seconds");
 
     expect(pageBundle.page.close).toHaveBeenCalled();
     expect(browser.close).toHaveBeenCalled();
@@ -496,7 +502,10 @@ describe("ChromeSearchifyPrinter", () => {
   });
 
   it("renames temp file to output after fallback copy", async () => {
-    mockSearchifyRuntime({ chromePath: "/custom/chrome" });
+    const frame = createSimulatedViewerFrame({
+      saveMock: vi.fn().mockResolvedValue(null),
+    });
+    mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame: frame });
 
     await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
       chromePath: "/custom/chrome",
@@ -525,14 +534,10 @@ describe("ChromeSearchifyPrinter", () => {
       expect.stringContaining("[ChromeSearchifyPrinter] Launching Chrome"),
     );
     expect(errorSpy).toHaveBeenCalledWith(
-      expect.stringContaining("[ChromeSearchifyPrinter] Found"),
+      expect.stringContaining("[ChromeSearchifyPrinter] Viewer ready"),
     );
     expect(errorSpy).toHaveBeenCalledWith(
-      expect.stringContaining("[ChromeSearchifyPrinter] OCR check attempt 1:"),
-      expect.objectContaining({
-        hasSearchifyText: true,
-        pdfSearchifySaveEnabled: true,
-      }),
+      expect.stringContaining("[ChromeSearchifyPrinter] OCR complete"),
     );
   });
 
@@ -622,32 +627,49 @@ describe("ChromeSearchifyPrinter", () => {
     });
   });
 
-  it("evaluate callback uses Blob and fetch, not Array.from(Uint8Array)", async () => {
-    let capturedFunction: string = "";
-    const viewerFrame = createViewerFrame();
-    viewerFrame.evaluate.mockImplementation(async (fn: unknown) => {
-      if (typeof fn !== "function") return undefined;
-      const fnString = fn.toString();
-      if (fnString.includes("hasSearchifyText_")) {
-        return { hasSearchifyText: true, pdfSearchifySaveEnabled: true };
-      }
-      capturedFunction = fnString;
-      return { uploaded: false, reason: "NO_DATA" };
+  it("executes saveAndUpload with SEARCHIFIED when OCR succeeds", async () => {
+    const saveMock = vi.fn().mockResolvedValue({
+      dataToSave: new Uint8Array([1, 2, 3]).buffer,
+      fileName: "saved.pdf",
+    });
+    const uploadMock = vi.fn().mockResolvedValue({ ok: true } as Response);
+
+    const viewerFrame = createSimulatedViewerFrame({
+      saveMock,
+      uploadMock,
     });
 
-    mockSearchifyRuntime({
-      chromePath: "/custom/chrome",
-      viewerFrame,
-    });
+    mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame });
 
     await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
       chromePath: "/custom/chrome",
     });
 
-    expect(capturedFunction).toContain("Blob");
-    expect(capturedFunction).toContain("fetch");
-    expect(capturedFunction).toContain("POST");
-    expect(capturedFunction).not.toContain("Array.from");
+    expect(saveMock).toHaveBeenCalledWith("SEARCHIFIED");
+    expect(uploadMock).toHaveBeenCalled();
+    expect(rename).toHaveBeenCalledTimes(1);
+  });
+
+  it("executes saveAndUpload with ORIGINAL when OCR reports pageCount=0", async () => {
+    const saveMock = vi.fn().mockResolvedValue({
+      dataToSave: new Uint8Array([1, 2, 3]).buffer,
+      fileName: "original.pdf",
+    });
+    const uploadMock = vi.fn().mockResolvedValue({ ok: true } as Response);
+
+    const viewerFrame = createSimulatedViewerFrame({
+      pageCount: 0,
+      saveMock,
+      uploadMock,
+    });
+
+    mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame });
+
+    await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+      chromePath: "/custom/chrome",
+    });
+
+    expect(saveMock).toHaveBeenCalledWith("ORIGINAL");
   });
 
   it("delegates to createUploadServer with temp output path", async () => {
@@ -665,9 +687,15 @@ describe("ChromeSearchifyPrinter", () => {
   });
 
   it("propagates browser upload fetch failures instead of falling back to NO_DATA", async () => {
-    const viewerFrame = createExecutingViewerFrame({
-      uploadError: new TypeError("Failed to fetch"),
+    const saveMock = vi.fn().mockResolvedValue({
+      dataToSave: new Uint8Array([1, 2, 3]).buffer,
+      fileName: "saved.pdf",
     });
+    const uploadMock = vi.fn().mockRejectedValue(
+      new TypeError("Failed to fetch"),
+    );
+
+    const viewerFrame = createSimulatedViewerFrame({ saveMock, uploadMock });
 
     const { browser, chromeProcess } = mockSearchifyRuntime({
       chromePath: "/custom/chrome",
@@ -687,44 +715,18 @@ describe("ChromeSearchifyPrinter", () => {
   });
 
   it("propagates ORIGINAL path upload failures when SEARCHIFIED save returns null", async () => {
-    const callCount = { value: 0 };
-    const viewerFrame = createViewerFrame();
-    viewerFrame.evaluate.mockImplementation(async (fn: unknown, params?: unknown) => {
-      if (typeof fn !== "function") return undefined;
-
-      const fnString = fn.toString();
-      if (fnString.includes("hasSearchifyText_")) {
-        return { hasSearchifyText: true, pdfSearchifySaveEnabled: true };
-      }
-
-      const originalViewer = (globalThis as Record<string, unknown>)["viewer"];
-      const originalFetch = globalThis.fetch;
-
-      try {
-        callCount.value++;
-        (globalThis as Record<string, unknown>)["viewer"] = {
-          currentController: {
-            handlePluginMessage_: vi.fn(),
-            save: vi.fn().mockImplementation((saveType: string) => {
-              if (saveType === "SEARCHIFIED") return Promise.resolve(null);
-              return Promise.resolve({
-                dataToSave: new Uint8Array([1, 2, 3]).buffer,
-                fileName: "original.pdf",
-              });
-            }),
-          },
-        };
-
-        vi.spyOn(globalThis, "fetch").mockRejectedValue(
-          new TypeError("NetworkError when attempting to fetch resource"),
-        );
-
-        return await (fn as (p: unknown) => Promise<unknown>)(params);
-      } finally {
-        (globalThis as Record<string, unknown>)["viewer"] = originalViewer;
-        globalThis.fetch = originalFetch;
-      }
+    const saveMock = vi.fn().mockImplementation((saveType: string) => {
+      if (saveType === "SEARCHIFIED") return Promise.resolve(null);
+      return Promise.resolve({
+        dataToSave: new Uint8Array([1, 2, 3]).buffer,
+        fileName: "original.pdf",
+      });
     });
+    const uploadMock = vi.fn().mockRejectedValue(
+      new TypeError("NetworkError when attempting to fetch resource"),
+    );
+
+    const viewerFrame = createSimulatedViewerFrame({ saveMock, uploadMock });
 
     const { browser, chromeProcess } = mockSearchifyRuntime({
       chromePath: "/custom/chrome",
@@ -737,6 +739,8 @@ describe("ChromeSearchifyPrinter", () => {
       }),
     ).rejects.toThrow("NetworkError when attempting to fetch resource");
 
+    expect(saveMock).toHaveBeenCalledWith("SEARCHIFIED");
+    expect(saveMock).toHaveBeenCalledWith("ORIGINAL");
     expect(copyFile).not.toHaveBeenCalled();
     expect(rename).not.toHaveBeenCalled();
     expect(browser.close).toHaveBeenCalled();
@@ -744,14 +748,13 @@ describe("ChromeSearchifyPrinter", () => {
   });
 
   it("propagates upload server close failure after successful upload", async () => {
-    const viewerFrame = createViewerFrame({
-      uploadResult: {
-        uploaded: true,
-        fileName: "saved.pdf",
-        byteLength: 1234,
-        saveType: "SEARCHIFIED" as const,
-      },
+    const saveMock = vi.fn().mockResolvedValue({
+      dataToSave: new Uint8Array([1, 2, 3]).buffer,
+      fileName: "saved.pdf",
     });
+    const uploadMock = vi.fn().mockResolvedValue({ ok: true } as Response);
+
+    const viewerFrame = createSimulatedViewerFrame({ saveMock, uploadMock });
 
     const uploadServerClose = vi
       .fn()

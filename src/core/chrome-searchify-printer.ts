@@ -19,6 +19,7 @@ import {
   createUploadServer,
   type UploadServerResult,
 } from "../utils/upload-server.js";
+import { saveAndUpload } from "./viewer-save-ops.js";
 
 const BROWSER_CLOSE_TIMEOUT_MS = 5_000;
 
@@ -37,10 +38,6 @@ const DEFAULT_CHROME_PATHS: Record<string, string[]> = {
     "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
   ],
 };
-
-type BrowserUploadResult =
-  | { uploaded: true; fileName: string; byteLength: number; saveType: "SEARCHIFIED" | "ORIGINAL" }
-  | { uploaded: false; reason: string; status?: number };
 
 export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
   private browser: Browser | null = null;
@@ -115,30 +112,13 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
 
       const fileUrl = pathToFileURL(inputPath).href;
       await page.goto(fileUrl, { waitUntil: "load", timeout: 15_000 });
-      await page.waitForTimeout(3000);
 
-      const frames = page.frames();
-      if (options?.verbose) {
-        console.error(
-          `[ChromeSearchifyPrinter] Found ${frames.length} frames`,
-        );
-      }
+      const viewerFrame = await this.waitForViewerFrame(page, options?.verbose);
 
-      const viewerFrame = frames[1];
-      if (!viewerFrame) {
-        throw new Error("PDF viewer frame not found");
-      }
-
-      const searchifyReady = await this.waitForSearchify(
+      const searchifyReady = await this.waitForSearchifyComplete(
         viewerFrame,
         options?.verbose,
       );
-
-      if (!searchifyReady && options?.verbose) {
-        console.error(
-          "[ChromeSearchifyPrinter] OCR not detected, attempting save anyway",
-        );
-      }
 
       const saveTimeoutMs = options?.saveTimeoutMs ?? 120_000;
       const uploadTimeoutMs = options?.uploadTimeoutMs ?? 120_000;
@@ -146,92 +126,7 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
       uploadServer = await createUploadServer(tempOutputPath, uploadTimeoutMs);
 
       const uploadResult = await viewerFrame.evaluate(
-        async (params: {
-          searchifyOk: boolean;
-          uploadUrl: string;
-          saveTimeoutMs: number;
-        }): Promise<BrowserUploadResult> => {
-          const viewer = (globalThis as Record<string, unknown>)["viewer"];
-          if (!viewer || typeof viewer !== "object") {
-            return { uploaded: false, reason: "NO_VIEWER" };
-          }
-
-          const ctrl = (viewer as Record<string, unknown>)["currentController"];
-          if (!ctrl || typeof ctrl !== "object") {
-            return { uploaded: false, reason: "NO_CONTROLLER" };
-          }
-
-          const ctrlObj = ctrl as Record<string, unknown>;
-          const origHandle = (ctrlObj["handlePluginMessage_"] as Function).bind(ctrl);
-          ctrlObj["handlePluginMessage_"] = function (msg: unknown) {
-            return (origHandle as Function)(msg);
-          };
-
-          try {
-            const saveType = params.searchifyOk ? "SEARCHIFIED" : "ORIGINAL";
-            const result = await Promise.race([
-              (ctrlObj["save"] as Function).call(ctrl, saveType),
-              new Promise<null>((resolve) =>
-                setTimeout(() => resolve(null), params.saveTimeoutMs),
-              ),
-            ]);
-
-            if (result && (result as Record<string, unknown>)["dataToSave"]) {
-              const r = result as { dataToSave: ArrayBuffer; fileName: string };
-              const blob = new Blob([r.dataToSave], { type: "application/pdf" });
-              const response = await fetch(params.uploadUrl, {
-                method: "POST",
-                headers: { "content-type": "application/pdf" },
-                body: blob,
-              });
-
-              if (!response.ok) {
-                return { uploaded: false, reason: "UPLOAD_FAILED", status: response.status };
-              }
-
-              return {
-                uploaded: true,
-                fileName: r.fileName,
-                byteLength: r.dataToSave.byteLength,
-                saveType,
-              };
-            }
-
-            if (saveType === "SEARCHIFIED") {
-              const originalResult = await Promise.race([
-                (ctrlObj["save"] as Function).call(ctrl, "ORIGINAL"),
-                new Promise<null>((resolve) =>
-                  setTimeout(() => resolve(null), params.saveTimeoutMs),
-                ),
-              ]);
-              if (originalResult && (originalResult as Record<string, unknown>)["dataToSave"]) {
-                const or = originalResult as { dataToSave: ArrayBuffer; fileName: string };
-                const blob = new Blob([or.dataToSave], { type: "application/pdf" });
-                const response = await fetch(params.uploadUrl, {
-                  method: "POST",
-                  headers: { "content-type": "application/pdf" },
-                  body: blob,
-                });
-
-                if (!response.ok) {
-                  return { uploaded: false, reason: "UPLOAD_FAILED", status: response.status };
-                }
-
-                return {
-                  uploaded: true,
-                  fileName: or.fileName,
-                  byteLength: or.dataToSave.byteLength,
-                  saveType: "ORIGINAL",
-                };
-              }
-            }
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            throw new Error(`Browser PDF save/upload failed: ${message}`);
-          }
-
-          return { uploaded: false, reason: "NO_DATA" };
-        },
+        saveAndUpload,
         {
           searchifyOk: searchifyReady,
           uploadUrl: uploadServer.url,
@@ -371,31 +266,194 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
     );
   }
 
-  private async waitForSearchify(
+  private async waitForViewerFrame(
+    page: Page,
+    verbose?: boolean,
+  ): Promise<Frame> {
+    for (let attempt = 0; attempt < 30; attempt++) {
+      const frames = page.frames();
+      const viewerFrame = frames[1];
+      if (viewerFrame) {
+        try {
+          const ready = await viewerFrame.evaluate(() => {
+            const v = (globalThis as Record<string, unknown>)["viewer"];
+            if (!v || typeof v !== "object") return false;
+            const ctrl = (v as Record<string, unknown>)["currentController"];
+            if (!ctrl) return false;
+            const vp = (v as Record<string, unknown>)["viewport_"] as Record<string, unknown> | undefined;
+            if (!vp) return false;
+            const pageDims = vp["pageDimensions_"] as Array<unknown> | undefined;
+            return Array.isArray(pageDims) && pageDims.length > 0;
+          });
+          if (ready) {
+            if (verbose) {
+              console.error(
+                `[ChromeSearchifyPrinter] Viewer ready after ${(attempt + 1) * 500}ms`,
+              );
+            }
+            return viewerFrame;
+          }
+        } catch {
+          // Frame not fully loaded yet
+        }
+      }
+      if (verbose && attempt === 0) {
+        console.error(
+          `[ChromeSearchifyPrinter] Found ${frames.length} frames, waiting for viewer...`,
+        );
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    throw new Error("PDF viewer frame not found within 15 seconds");
+  }
+
+  private async waitForSearchifyComplete(
     viewerFrame: Frame,
     verbose?: boolean,
   ): Promise<boolean> {
-    for (let attempt = 0; attempt < 10; attempt++) {
-      const info = await viewerFrame.evaluate(() => {
-        const v = (globalThis as Record<string, unknown>)["viewer"] as Record<string, unknown> | undefined;
+    const setupResult = await viewerFrame.evaluate(async (): Promise<{
+      pageCount: number;
+      initialHasSearchifyText: boolean;
+      doneAfterScroll: boolean;
+    }> => {
+      const g = globalThis as Record<string, unknown>;
+      const viewer = g["viewer"] as Record<string, unknown> | undefined;
+      if (!viewer)
+        return { pageCount: 0, initialHasSearchifyText: false, doneAfterScroll: false };
+
+      const ctrl = viewer["currentController"] as Record<string, unknown> | undefined;
+      if (!ctrl)
+        return { pageCount: 0, initialHasSearchifyText: false, doneAfterScroll: false };
+
+      const initialHasSearchifyText =
+        (viewer["hasSearchifyText_"] as boolean) ?? false;
+
+      const progress: Record<string, boolean> = { started: false, done: false };
+      g["__searchifyProgress"] = progress;
+
+      const origHandle = (ctrl["handlePluginMessage_"] as Function).bind(ctrl);
+      ctrl["handlePluginMessage_"] = function (msg: unknown) {
+        const msgData = (msg as { data?: Record<string, unknown> })?.data;
+        if (msgData?.["type"] === "showSearchifyInProgress") {
+          if (msgData["show"] === true) {
+            progress.started = true;
+          } else if (msgData["show"] === false) {
+            progress.done = true;
+          }
+        }
+        return (origHandle as Function)(msg);
+      };
+
+      const docLength = (viewer["docLength_"] as number | undefined) || 0;
+      const docDimsNoUnder = viewer["documentDimensions"] as Record<string, unknown> | undefined;
+      const docDimsPagesNoUnder = docDimsNoUnder
+        ? (docDimsNoUnder["pageDimensions"] as Array<unknown> | undefined)?.length
+        : undefined;
+      const docDims = viewer["documentDimensions_"] as Record<string, unknown> | undefined;
+      const docDimsPages = docDims
+        ? (docDims["pageDimensions"] as Array<unknown> | undefined)?.length
+        : undefined;
+      const viewport = viewer["viewport_"] as Record<string, unknown> | undefined;
+      const vpPageDims = viewport
+        ? (viewport["pageDimensions_"] as Array<unknown> | undefined)
+        : undefined;
+      const viewportPages = vpPageDims?.length;
+      const pageCount =
+        docLength || docDimsPagesNoUnder || docDimsPages || viewportPages || 0;
+
+      if (viewport && typeof viewport["goToPage"] === "function") {
+        for (let i = 0; i < pageCount; i++) {
+          (viewport["goToPage"] as Function).call(viewport, i);
+          await new Promise((r) => setTimeout(r, 300));
+        }
+      }
+
+      return { pageCount, initialHasSearchifyText, doneAfterScroll: progress["done"] ?? false };
+    });
+
+    const { pageCount, initialHasSearchifyText, doneAfterScroll } = setupResult;
+
+    if (verbose) {
+      console.error(
+        `[ChromeSearchifyPrinter] Pages: ${pageCount}, initialHasSearchifyText: ${initialHasSearchifyText}, doneAfterScroll: ${doneAfterScroll}`,
+      );
+    }
+
+    if (pageCount === 0) return false;
+    if (doneAfterScroll) {
+      if (verbose) {
+        console.error("[ChromeSearchifyPrinter] OCR already complete after scrolling");
+      }
+      return true;
+    }
+
+    const maxWaitMs = 15_000 + pageCount * 3_000;
+    const pollIntervalMs = 500;
+    const startTime = Date.now();
+    let ocrStarted = false;
+    let pollCount = 0;
+
+    while (Date.now() - startTime < maxWaitMs) {
+      const state = await viewerFrame.evaluate((): {
+        started: boolean;
+        done: boolean;
+        hasSearchifyText: boolean;
+      } => {
+        const g = globalThis as Record<string, unknown>;
+        const p = g["__searchifyProgress"] as Record<string, boolean> | undefined;
+        const v = g["viewer"] as Record<string, unknown> | undefined;
         return {
+          started: p?.["started"] ?? false,
+          done: p?.["done"] ?? false,
           hasSearchifyText: (v?.["hasSearchifyText_"] as boolean) ?? false,
-          pdfSearchifySaveEnabled: (v?.["pdfSearchifySaveEnabled_"] as boolean) ?? false,
         };
       });
 
-      if (verbose) {
-        console.error(
-          `[ChromeSearchifyPrinter] OCR check attempt ${attempt + 1}:`,
-          info,
-        );
-      }
-
-      if (info.hasSearchifyText) {
+      if (state.done) {
+        if (verbose) {
+          console.error(
+            `[ChromeSearchifyPrinter] OCR complete after ${Date.now() - startTime}ms`,
+          );
+        }
         return true;
       }
 
-      await new Promise((r) => setTimeout(r, 1000));
+      if (state.started) {
+        ocrStarted = true;
+      }
+
+      if (!ocrStarted && state.hasSearchifyText && Date.now() - startTime > 5_000) {
+        if (verbose) {
+          console.error(
+            "[ChromeSearchifyPrinter] OCR likely completed before detection (hasSearchifyText=true, no start signal)",
+          );
+        }
+        return true;
+      }
+
+      if (!ocrStarted && !state.hasSearchifyText && Date.now() - startTime > 15_000) {
+        if (verbose) {
+          console.error(
+            "[ChromeSearchifyPrinter] OCR not started after 15s, assuming text-only PDF",
+          );
+        }
+        return false;
+      }
+
+      pollCount++;
+      if (verbose && pollCount % 10 === 0) {
+        console.error(
+          `[ChromeSearchifyPrinter] Waiting for OCR... ${Date.now() - startTime}ms elapsed`,
+        );
+      }
+
+      await new Promise((r) => setTimeout(r, pollIntervalMs));
+    }
+
+    if (verbose) {
+      console.error(
+        `[ChromeSearchifyPrinter] OCR timed out after ${maxWaitMs}ms`,
+      );
     }
     return false;
   }

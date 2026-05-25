@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { PDFDocument } from "pdf-lib";
+import { PDFDocument, PDFDict, PDFName } from "pdf-lib";
 import { runCli } from "./helpers/run-cli.js";
 import {
   cleanupDir,
@@ -33,6 +33,16 @@ describe("CLI conversion smoke", () => {
   function countFontObjects(pdfBytes: Buffer): number {
     const text = pdfBytes.toString("latin1");
     return (text.match(/\/Type\s*\/Font[^s]/g) || []).length;
+  }
+
+  async function getPageFontCounts(pdfBytes: Buffer): Promise<number[]> {
+    const doc = await PDFDocument.load(pdfBytes);
+    return doc.getPages().map((page) => {
+      const resources = page.node.lookup(PDFName.of("Resources"));
+      if (!(resources instanceof PDFDict)) return 0;
+      const fonts = resources.lookup(PDFName.of("Font"));
+      return fonts instanceof PDFDict ? fonts.size() : 0;
+    });
   }
 
   afterEach(async () => {
@@ -166,6 +176,13 @@ describe("CLI conversion smoke", () => {
 
     const fontCount = countFontObjects(outputBytes);
     expect(fontCount, `${fontCount} font objects found, expected > 0`).toBeGreaterThan(0);
+
+    const pageFontCounts = await getPageFontCounts(outputBytes);
+    expect(pageFontCounts, `font resources per page: ${pageFontCounts.join(", ")}`).toHaveLength(3);
+    expect(
+      pageFontCounts.every((c) => c > 0),
+      `expected all 3 pages to have font resources, got: ${pageFontCounts.join(", ")}`,
+    ).toBe(true);
 
     expect(outputBytes.equals(inputBytes)).toBe(false);
   }, 120_000);
