@@ -17,10 +17,6 @@ function setupGlobalViewer(options?: {
     dataToSave: new Uint8Array([1, 2, 3]).buffer,
     fileName: "saved.pdf",
   };
-  const defaultOriginalResult = {
-    dataToSave: new Uint8Array([4, 5, 6]).buffer,
-    fileName: "original.pdf",
-  };
 
   const searchified =
     "searchifiedSaveResult" in (options ?? {})
@@ -29,16 +25,9 @@ function setupGlobalViewer(options?: {
         ? options!.saveResult
         : defaultSaveResult;
 
-  const original =
-    "originalSaveResult" in (options ?? {})
-      ? options!.originalSaveResult
-      : "saveResult" in (options ?? {})
-        ? options!.saveResult
-        : defaultOriginalResult;
-
   const saveMock = vi.fn().mockImplementation((saveType: string) => {
     if (saveType === "SEARCHIFIED") return Promise.resolve(searchified);
-    return Promise.resolve(original);
+    return Promise.resolve(null);
   });
 
   const viewer = {
@@ -100,7 +89,7 @@ describe("saveAndUpload", () => {
     expect(result).toEqual({ uploaded: false, reason: "NO_CONTROLLER" });
   });
 
-  it("calls save with SEARCHIFIED when searchifyOk is true", async () => {
+  it("uploads SEARCHIFIED data when searchifyOk is true and save succeeds", async () => {
     const env = setupGlobalViewer();
     cleanup = env.cleanup;
     vi.spyOn(globalThis, "fetch").mockResolvedValue({ ok: true } as Response);
@@ -112,6 +101,7 @@ describe("saveAndUpload", () => {
     });
 
     expect(env.saveMock).toHaveBeenCalledWith("SEARCHIFIED");
+    expect(env.saveMock).toHaveBeenCalledTimes(1);
     expect(result).toEqual({
       uploaded: true,
       fileName: "saved.pdf",
@@ -120,10 +110,9 @@ describe("saveAndUpload", () => {
     });
   });
 
-  it("calls save with ORIGINAL when searchifyOk is false", async () => {
+  it("returns OCR_INCOMPLETE when searchifyOk is false without attempting save", async () => {
     const env = setupGlobalViewer();
     cleanup = env.cleanup;
-    vi.spyOn(globalThis, "fetch").mockResolvedValue({ ok: true } as Response);
 
     const result = await saveAndUpload({
       searchifyOk: false,
@@ -131,21 +120,15 @@ describe("saveAndUpload", () => {
       saveTimeoutMs: 5_000,
     });
 
-    expect(env.saveMock).toHaveBeenCalledWith("ORIGINAL");
-    expect(result).toEqual({
-      uploaded: true,
-      fileName: "original.pdf",
-      byteLength: 3,
-      saveType: "ORIGINAL",
-    });
+    expect(env.saveMock).not.toHaveBeenCalled();
+    expect(result).toEqual({ uploaded: false, reason: "OCR_INCOMPLETE" });
   });
 
-  it("falls back to ORIGINAL save when SEARCHIFIED returns null", async () => {
+  it("returns NO_DATA when SEARCHIFIED save returns null without attempting ORIGINAL", async () => {
     const env = setupGlobalViewer({
       searchifiedSaveResult: null,
     });
     cleanup = env.cleanup;
-    vi.spyOn(globalThis, "fetch").mockResolvedValue({ ok: true } as Response);
 
     const result = await saveAndUpload({
       searchifyOk: true,
@@ -154,28 +137,7 @@ describe("saveAndUpload", () => {
     });
 
     expect(env.saveMock).toHaveBeenCalledWith("SEARCHIFIED");
-    expect(env.saveMock).toHaveBeenCalledWith("ORIGINAL");
-    expect(result).toEqual({
-      uploaded: true,
-      fileName: "original.pdf",
-      byteLength: 3,
-      saveType: "ORIGINAL",
-    });
-  });
-
-  it("returns NO_DATA when both save types return null", async () => {
-    const env = setupGlobalViewer({
-      searchifiedSaveResult: null,
-      originalSaveResult: null,
-    });
-    cleanup = env.cleanup;
-
-    const result = await saveAndUpload({
-      searchifyOk: true,
-      uploadUrl: "http://localhost/upload",
-      saveTimeoutMs: 5_000,
-    });
-
+    expect(env.saveMock).toHaveBeenCalledTimes(1);
     expect(result).toEqual({ uploaded: false, reason: "NO_DATA" });
   });
 
@@ -238,22 +200,6 @@ describe("saveAndUpload", () => {
     const call = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
     const body = call[1]?.body as Blob;
     expect(body).toBeInstanceOf(Blob);
-  });
-
-  it("returns NO_DATA when searchifyOk=false and save returns null", async () => {
-    const env = setupGlobalViewer({
-      saveResult: null,
-    });
-    cleanup = env.cleanup;
-
-    const result = await saveAndUpload({
-      searchifyOk: false,
-      uploadUrl: "http://localhost/upload",
-      saveTimeoutMs: 5_000,
-    });
-
-    expect(result).toEqual({ uploaded: false, reason: "NO_DATA" });
-    expect(env.saveMock).toHaveBeenCalledTimes(1);
   });
 
   it("returns NO_DATA when save result has no dataToSave", async () => {

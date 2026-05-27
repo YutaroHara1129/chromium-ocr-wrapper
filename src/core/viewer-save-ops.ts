@@ -1,5 +1,5 @@
 type SaveUploadResult =
-  | { uploaded: true; fileName: string; byteLength: number; saveType: "SEARCHIFIED" | "ORIGINAL" }
+  | { uploaded: true; fileName: string; byteLength: number; saveType: "SEARCHIFIED" }
   | { uploaded: false; reason: string; status?: number };
 
 export type { SaveUploadResult };
@@ -23,12 +23,15 @@ export async function saveAndUpload(
     return { uploaded: false, reason: "NO_CONTROLLER" };
   }
 
+  if (!params.searchifyOk) {
+    return { uploaded: false, reason: "OCR_INCOMPLETE" };
+  }
+
   const ctrlObj = ctrl as Record<string, unknown>;
 
   try {
-    const saveType = params.searchifyOk ? "SEARCHIFIED" : "ORIGINAL";
     const result = await Promise.race([
-      (ctrlObj["save"] as Function).call(ctrl, saveType),
+      (ctrlObj["save"] as Function).call(ctrl, "SEARCHIFIED"),
       new Promise<null>((resolve) =>
         setTimeout(() => resolve(null), params.saveTimeoutMs),
       ),
@@ -51,37 +54,8 @@ export async function saveAndUpload(
         uploaded: true,
         fileName: r.fileName,
         byteLength: r.dataToSave.byteLength,
-        saveType,
+        saveType: "SEARCHIFIED",
       };
-    }
-
-    if (saveType === "SEARCHIFIED") {
-      const originalResult = await Promise.race([
-        (ctrlObj["save"] as Function).call(ctrl, "ORIGINAL"),
-        new Promise<null>((resolve) =>
-          setTimeout(() => resolve(null), params.saveTimeoutMs),
-        ),
-      ]);
-      if (originalResult && (originalResult as Record<string, unknown>)["dataToSave"]) {
-        const or = originalResult as { dataToSave: ArrayBuffer; fileName: string };
-        const blob = new Blob([or.dataToSave], { type: "application/pdf" });
-        const response = await fetch(params.uploadUrl, {
-          method: "POST",
-          headers: { "content-type": "application/pdf" },
-          body: blob,
-        });
-
-        if (!response.ok) {
-          return { uploaded: false, reason: "UPLOAD_FAILED", status: response.status };
-        }
-
-        return {
-          uploaded: true,
-          fileName: or.fileName,
-          byteLength: or.dataToSave.byteLength,
-          saveType: "ORIGINAL",
-        };
-      }
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
