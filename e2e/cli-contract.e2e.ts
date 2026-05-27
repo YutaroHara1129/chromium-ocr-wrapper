@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { execFile } from "node:child_process";
-import { access, mkdir, readFile, symlink } from "node:fs/promises";
+import { access, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -167,6 +167,130 @@ describe("CLI contract", () => {
     expect(result.exitCode).not.toBe(0);
     expect(result.stderr).toContain("invalid.pdf");
     expect(result.stderr).toContain("valid.pdf");
+  });
+
+  it("rejects --output file path with multiple explicit file inputs", async () => {
+    const tempDir = await makeTempDir();
+    await createTextPdf(join(tempDir, "one.pdf"), "One");
+    await createTextPdf(join(tempDir, "two.pdf"), "Two");
+
+    const result = await runCli([
+      join(tempDir, "one.pdf"),
+      join(tempDir, "two.pdf"),
+      "--output",
+      join(tempDir, "combined.pdf"),
+      "--chrome-path",
+      "/nonexistent/chrome",
+    ]);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("--output file path is not allowed with multiple inputs");
+    expect(result.stderr).toContain("Specify a directory instead");
+  });
+
+  it("accepts existing --output directory with multiple explicit file inputs", async () => {
+    const tempDir = await makeTempDir();
+    const outputDir = join(tempDir, "out");
+    await mkdir(outputDir, { recursive: true });
+    await createTextPdf(join(tempDir, "one.pdf"), "One");
+    await createTextPdf(join(tempDir, "two.pdf"), "Two");
+
+    const result = await runCli([
+      join(tempDir, "one.pdf"),
+      join(tempDir, "two.pdf"),
+      "--output",
+      outputDir,
+      "--chrome-path",
+      "/nonexistent/chrome",
+    ]);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("Failed:");
+    expect(result.stderr).toContain("one.pdf");
+    expect(result.stderr).toContain("two.pdf");
+    expect(result.stderr).not.toContain("--output file path is not allowed");
+  });
+
+  it("directory input discovers PDFs recursively", async () => {
+    const tempDir = await makeTempDir();
+    const nestedDir = join(tempDir, "nested");
+    await mkdir(nestedDir, { recursive: true });
+    await createTextPdf(join(tempDir, "root.pdf"), "Root");
+    await createTextPdf(join(nestedDir, "child.pdf"), "Child");
+
+    const result = await runCli([
+      tempDir,
+      "--chrome-path",
+      "/nonexistent/chrome",
+    ]);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("root.pdf");
+    expect(result.stderr).toContain("child.pdf");
+    expect(result.stderr).not.toContain("No PDF files found");
+  });
+
+  it("directory input ignores non-PDF files", async () => {
+    const tempDir = await makeTempDir();
+    await createTextPdf(join(tempDir, "input.pdf"), "Input");
+    await writeFile(join(tempDir, "notes.txt"), "not a pdf", "utf8");
+
+    const result = await runCli([
+      tempDir,
+      "--chrome-path",
+      "/nonexistent/chrome",
+    ]);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("input.pdf");
+    expect(result.stderr).not.toContain("No PDF files found");
+  });
+
+  it("exits with error for empty directory input", async () => {
+    const tempDir = await makeTempDir();
+    const emptyDir = join(tempDir, "empty");
+    await mkdir(emptyDir, { recursive: true });
+
+    const result = await runCli([emptyDir]);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("No PDF files found");
+  });
+
+  it("deduplicates overlapping explicit and glob inputs", async () => {
+    const tempDir = await makeTempDir();
+    await createTextPdf(join(tempDir, "dup.pdf"), "Duplicate");
+
+    const result = await runCli([
+      join(tempDir, "dup.pdf"),
+      join(tempDir, "*.pdf"),
+      "--chrome-path",
+      "/nonexistent/chrome",
+    ]);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("dup.pdf");
+    expect((result.stderr.match(/Failed:/g) ?? []).length).toBe(1);
+  });
+
+  it("mixed directory and explicit file inputs are accepted", async () => {
+    const tempDir = await makeTempDir();
+    const dirInput = join(tempDir, "batch");
+    await mkdir(dirInput, { recursive: true });
+    await createTextPdf(join(dirInput, "from-directory.pdf"), "Directory");
+    await createTextPdf(join(tempDir, "explicit.pdf"), "Explicit");
+
+    const result = await runCli([
+      dirInput,
+      join(tempDir, "explicit.pdf"),
+      "--chrome-path",
+      "/nonexistent/chrome",
+    ]);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("from-directory.pdf");
+    expect(result.stderr).toContain("explicit.pdf");
+    expect(result.stderr).not.toContain("No PDF files found");
   });
 
   it("package bin aliases both work", async () => {

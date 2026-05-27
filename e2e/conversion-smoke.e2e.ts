@@ -216,4 +216,104 @@ describe("CLI conversion smoke", () => {
     const fontCount = countFontObjects(outputBytes);
     expect(fontCount, `${fontCount} font objects found, expected > 0`).toBeGreaterThan(0);
   }, 600_000);
+
+  it("converts multiple explicit file paths into an output directory", async () => {
+    const tempDir = await makeTempDir();
+    const outputDir = join(tempDir, "out");
+    await mkdir(outputDir, { recursive: true });
+    await createTextPdf(join(tempDir, "one.pdf"), "One");
+    await createTextPdf(join(tempDir, "two.pdf"), "Two");
+
+    const result = await runCli([
+      join(tempDir, "one.pdf"),
+      join(tempDir, "two.pdf"),
+      "--output",
+      outputDir,
+    ]);
+
+    const diagnostics = `exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`;
+    expect(result, diagnostics).toMatchObject({ exitCode: 0 });
+    expect(result.stderr, diagnostics).toBe("");
+    expect(result.stdout, diagnostics).toContain("Done:");
+
+    const oneOutput = join(outputDir, "one_searchable.pdf");
+    const twoOutput = join(outputDir, "two_searchable.pdf");
+
+    expect((await stat(oneOutput)).size).toBeGreaterThan(0);
+    expect((await stat(twoOutput)).size).toBeGreaterThan(0);
+    expect(await getPageCount(oneOutput)).toBe(1);
+    expect(await getPageCount(twoOutput)).toBe(1);
+  }, 120_000);
+
+  it("converts directory input recursively preserving subdirectory structure", async () => {
+    const tempDir = await makeTempDir();
+    const inputDir = join(tempDir, "input");
+    const nestedDir = join(inputDir, "sub");
+    const outputDir = join(tempDir, "out");
+    await mkdir(nestedDir, { recursive: true });
+    await mkdir(outputDir, { recursive: true });
+    await createTextPdf(join(inputDir, "root.pdf"), "Root");
+    await createTextPdf(join(nestedDir, "child.pdf"), "Child");
+
+    const result = await runCli([inputDir, "--output", outputDir]);
+
+    const diagnostics = `exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`;
+    expect(result, diagnostics).toMatchObject({ exitCode: 0 });
+    expect(result.stderr, diagnostics).toBe("");
+    expect(result.stdout, diagnostics).toContain("Done:");
+
+    const rootOutput = join(outputDir, "root_searchable.pdf");
+    const childOutput = join(outputDir, "sub", "child_searchable.pdf");
+
+    expect((await stat(rootOutput)).size).toBeGreaterThan(0);
+    expect((await stat(childOutput)).size).toBeGreaterThan(0);
+    expect(await getPageCount(rootOutput)).toBe(1);
+    expect(await getPageCount(childOutput)).toBe(1);
+  }, 120_000);
+
+  it("converts multiple inputs with default output paths next to each input", async () => {
+    const tempDir = await makeTempDir();
+    const oneInput = await createTextPdf(join(tempDir, "one.pdf"), "One");
+    const twoInput = await createTextPdf(join(tempDir, "two.pdf"), "Two");
+
+    const result = await runCli([oneInput, twoInput]);
+
+    const diagnostics = `exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`;
+    expect(result, diagnostics).toMatchObject({ exitCode: 0 });
+    expect(result.stderr, diagnostics).toBe("");
+
+    const oneOutput = join(tempDir, "one_searchable.pdf");
+    const twoOutput = join(tempDir, "two_searchable.pdf");
+
+    expect((await stat(oneOutput)).size).toBeGreaterThan(0);
+    expect((await stat(twoOutput)).size).toBeGreaterThan(0);
+    expect(await getPageCount(oneOutput)).toBe(1);
+    expect(await getPageCount(twoOutput)).toBe(1);
+  }, 120_000);
+
+  it("continues converting remaining files when one output already exists", async () => {
+    const tempDir = await makeTempDir();
+    const outputDir = join(tempDir, "out");
+    await mkdir(outputDir, { recursive: true });
+    await createTextPdf(join(tempDir, "one.pdf"), "One");
+    await createTextPdf(join(tempDir, "two.pdf"), "Two");
+    await createTextPdf(join(outputDir, "one_searchable.pdf"), "Existing");
+
+    const result = await runCli([
+      join(tempDir, "one.pdf"),
+      join(tempDir, "two.pdf"),
+      "--output",
+      outputDir,
+    ]);
+
+    const diagnostics = `exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`;
+    expect(result, diagnostics).toMatchObject({ exitCode: 1 });
+    expect(result.stderr, diagnostics).toContain("Failed:");
+    expect(result.stderr, diagnostics).toContain("one_searchable.pdf");
+    expect(result.stdout, diagnostics).toContain("Done:");
+
+    const twoOutput = join(outputDir, "two_searchable.pdf");
+    expect((await stat(twoOutput)).size).toBeGreaterThan(0);
+    expect(await getPageCount(twoOutput)).toBe(1);
+  }, 120_000);
 });
