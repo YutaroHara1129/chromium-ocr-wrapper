@@ -1,7 +1,6 @@
 import { chromium } from "playwright-core";
 import { spawn, type ChildProcess } from "node:child_process";
 import {
-  copyFile,
   cp,
   mkdtemp,
   rename,
@@ -155,13 +154,9 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
 
         await rename(tempOutputPath, outputPath);
       } else {
-        if (options?.verbose) {
-          console.error(
-            `[ChromeSearchifyPrinter] Save returned no data (${uploadResult.reason}), copying original file`,
-          );
-        }
-        await copyFile(inputPath, tempOutputPath);
-        await rename(tempOutputPath, outputPath);
+        throw new Error(
+          `OCR did not produce searchable output (${uploadResult.reason})`,
+        );
       }
 
       await uploadServer.close();
@@ -431,15 +426,6 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
 
       if (state.started) {
         ocrStarted = true;
-      }
-
-      if (!ocrStarted && state.hasSearchifyText && Date.now() - startTime > 5_000) {
-        if (verbose) {
-          console.error(
-            "[ChromeSearchifyPrinter] OCR likely completed before detection (hasSearchifyText=true, no start signal)",
-          );
-        }
-        return true;
       }
 
       if (!ocrStarted && !state.hasSearchifyText && Date.now() - startTime > notStartedThresholdMs) {

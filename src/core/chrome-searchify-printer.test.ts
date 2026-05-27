@@ -510,24 +510,22 @@ describe("ChromeSearchifyPrinter", () => {
     });
   });
 
-  it("renames temp file to output after fallback copy", async () => {
+  it("throws OCR error instead of copying original when upload returns no data", async () => {
     const frame = createSimulatedViewerFrame({
       saveMock: vi.fn().mockResolvedValue(null),
     });
-    mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame: frame });
+    const { browser, chromeProcess } = mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame: frame });
 
-    await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
-      chromePath: "/custom/chrome",
-    });
+    await expect(
+      printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+        chromePath: "/custom/chrome",
+      }),
+    ).rejects.toThrow("OCR did not produce searchable output");
 
-    expect(copyFile).toHaveBeenCalledWith(
-      "/tmp/input.pdf",
-      expect.stringContaining(".output.pdf."),
-    );
-    expect(rename).toHaveBeenCalledWith(
-      expect.stringContaining(".output.pdf."),
-      "/tmp/output.pdf",
-    );
+    expect(copyFile).not.toHaveBeenCalled();
+    expect(rename).not.toHaveBeenCalled();
+    expect(browser.close).toHaveBeenCalled();
+    expect(chromeProcess.kill).toHaveBeenCalled();
   });
 
   it("verbose mode logs diagnostic messages", async () => {
@@ -655,30 +653,33 @@ describe("ChromeSearchifyPrinter", () => {
     });
 
     expect(saveMock).toHaveBeenCalledWith("SEARCHIFIED");
+    expect(saveMock).toHaveBeenCalledTimes(1);
     expect(uploadMock).toHaveBeenCalled();
     expect(rename).toHaveBeenCalledTimes(1);
   });
 
-  it("executes saveAndUpload with ORIGINAL when OCR reports pageCount=0", async () => {
+  it("throws OCR error when pageCount is 0 (no pages to OCR)", async () => {
     const saveMock = vi.fn().mockResolvedValue({
       dataToSave: new Uint8Array([1, 2, 3]).buffer,
       fileName: "original.pdf",
     });
-    const uploadMock = vi.fn().mockResolvedValue({ ok: true } as Response);
 
     const viewerFrame = createSimulatedViewerFrame({
       pageCount: 0,
       saveMock,
-      uploadMock,
     });
 
-    mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame });
+    const { browser, chromeProcess } = mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame });
 
-    await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
-      chromePath: "/custom/chrome",
-    });
+    await expect(
+      printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+        chromePath: "/custom/chrome",
+      }),
+    ).rejects.toThrow("OCR did not produce searchable output");
 
-    expect(saveMock).toHaveBeenCalledWith("ORIGINAL");
+    expect(saveMock).not.toHaveBeenCalled();
+    expect(browser.close).toHaveBeenCalled();
+    expect(chromeProcess.kill).toHaveBeenCalled();
   });
 
   it("delegates to createUploadServer with temp output path", async () => {
@@ -723,19 +724,10 @@ describe("ChromeSearchifyPrinter", () => {
     expect(chromeProcess.kill).toHaveBeenCalled();
   });
 
-  it("propagates ORIGINAL path upload failures when SEARCHIFIED save returns null", async () => {
-    const saveMock = vi.fn().mockImplementation((saveType: string) => {
-      if (saveType === "SEARCHIFIED") return Promise.resolve(null);
-      return Promise.resolve({
-        dataToSave: new Uint8Array([1, 2, 3]).buffer,
-        fileName: "original.pdf",
-      });
-    });
-    const uploadMock = vi.fn().mockRejectedValue(
-      new TypeError("NetworkError when attempting to fetch resource"),
-    );
+  it("throws OCR error when SEARCHIFIED save returns null without attempting ORIGINAL", async () => {
+    const saveMock = vi.fn().mockResolvedValue(null);
 
-    const viewerFrame = createSimulatedViewerFrame({ saveMock, uploadMock });
+    const viewerFrame = createSimulatedViewerFrame({ saveMock });
 
     const { browser, chromeProcess } = mockSearchifyRuntime({
       chromePath: "/custom/chrome",
@@ -746,10 +738,10 @@ describe("ChromeSearchifyPrinter", () => {
       printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
         chromePath: "/custom/chrome",
       }),
-    ).rejects.toThrow("NetworkError when attempting to fetch resource");
+    ).rejects.toThrow("OCR did not produce searchable output");
 
     expect(saveMock).toHaveBeenCalledWith("SEARCHIFIED");
-    expect(saveMock).toHaveBeenCalledWith("ORIGINAL");
+    expect(saveMock).toHaveBeenCalledTimes(1);
     expect(copyFile).not.toHaveBeenCalled();
     expect(rename).not.toHaveBeenCalled();
     expect(browser.close).toHaveBeenCalled();
@@ -972,12 +964,12 @@ describe("ChromeSearchifyPrinter", () => {
       expect(saveMock).toHaveBeenCalledWith("SEARCHIFIED");
     });
 
-    it("returns true when hasSearchifyText detected without start signal after 5s", async () => {
+    it("times out when polling only observes hasSearchifyText without a done signal", async () => {
       vi.useFakeTimers();
 
       const saveMock = vi.fn().mockResolvedValue({
         dataToSave: new Uint8Array([1, 2, 3]).buffer,
-        fileName: "saved.pdf",
+        fileName: "original.pdf",
       });
 
       const frame = createSimulatedViewerFrame({
@@ -988,7 +980,7 @@ describe("ChromeSearchifyPrinter", () => {
       });
 
       const { page } = createPage(frame);
-      mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame: frame, page });
+      const { browser, chromeProcess } = mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame: frame, page });
 
       const promise = printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
         chromePath: "/custom/chrome",
@@ -996,13 +988,16 @@ describe("ChromeSearchifyPrinter", () => {
       });
       promise.catch(() => {});
 
-      await advanceUntilSettled(promise, 15_000);
+      await advanceUntilSettled(promise, 30_000);
 
-      await expect(promise).resolves.toBeUndefined();
-      expect(saveMock).toHaveBeenCalledWith("SEARCHIFIED");
+      await expect(promise).rejects.toThrow("OCR did not produce searchable output");
+      expect(saveMock).not.toHaveBeenCalled();
+      expect(copyFile).not.toHaveBeenCalled();
+      expect(browser.close).toHaveBeenCalled();
+      expect(chromeProcess.kill).toHaveBeenCalled();
     });
 
-    it("returns false when OCR never starts for text-only PDF", async () => {
+    it("throws OCR error when OCR never starts for text-only PDF", async () => {
       vi.useFakeTimers();
 
       const saveMock = vi.fn().mockResolvedValue({
@@ -1018,7 +1013,7 @@ describe("ChromeSearchifyPrinter", () => {
       });
 
       const { page } = createPage(frame);
-      mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame: frame, page });
+      const { browser, chromeProcess } = mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame: frame, page });
 
       const promise = printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
         chromePath: "/custom/chrome",
@@ -1028,11 +1023,14 @@ describe("ChromeSearchifyPrinter", () => {
 
       await advanceUntilSettled(promise, 30_000);
 
-      await expect(promise).resolves.toBeUndefined();
-      expect(saveMock).toHaveBeenCalledWith("ORIGINAL");
+      await expect(promise).rejects.toThrow("OCR did not produce searchable output");
+      expect(saveMock).not.toHaveBeenCalled();
+      expect(copyFile).not.toHaveBeenCalled();
+      expect(browser.close).toHaveBeenCalled();
+      expect(chromeProcess.kill).toHaveBeenCalled();
     });
 
-    it("returns false when OCR starts but never completes within maxWaitMs", async () => {
+    it("throws OCR error when OCR starts but never completes within maxWaitMs", async () => {
       vi.useFakeTimers();
 
       const saveMock = vi.fn().mockResolvedValue({
@@ -1048,7 +1046,7 @@ describe("ChromeSearchifyPrinter", () => {
       });
 
       const { page } = createPage(frame);
-      mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame: frame, page });
+      const { browser, chromeProcess } = mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame: frame, page });
 
       const promise = printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
         chromePath: "/custom/chrome",
@@ -1057,8 +1055,11 @@ describe("ChromeSearchifyPrinter", () => {
 
       await advanceUntilSettled(promise, 30_000);
 
-      await expect(promise).resolves.toBeUndefined();
-      expect(saveMock).toHaveBeenCalledWith("ORIGINAL");
+      await expect(promise).rejects.toThrow("OCR did not produce searchable output");
+      expect(saveMock).not.toHaveBeenCalled();
+      expect(copyFile).not.toHaveBeenCalled();
+      expect(browser.close).toHaveBeenCalled();
+      expect(chromeProcess.kill).toHaveBeenCalled();
     });
 
     it("logs verbose messages during OCR polling and timeout", async () => {
@@ -1083,7 +1084,7 @@ describe("ChromeSearchifyPrinter", () => {
 
       await advanceUntilSettled(promise, 30_000);
 
-      await expect(promise).resolves.toBeUndefined();
+      await expect(promise).rejects.toThrow("OCR did not produce searchable output");
       expect(errorSpy).toHaveBeenCalledWith(
         expect.stringContaining("Waiting for OCR..."),
       );
@@ -1125,7 +1126,7 @@ describe("ChromeSearchifyPrinter", () => {
           if (typeof fn !== "function") return undefined;
           const fnString = fn.toString();
 
-          if (fnString.includes("viewer") && fnString.includes("currentController") && !fnString.includes("__searchifyProgress")) {
+          if (fnString.includes("viewer") && fnString.includes("currentController") && !fnString.includes("__searchifyProgress") && !fnString.includes("saveTimeoutMs")) {
             viewerReadyCallCount++;
             if (viewerReadyCallCount === 1) throw new Error("frame not ready");
             return true;
