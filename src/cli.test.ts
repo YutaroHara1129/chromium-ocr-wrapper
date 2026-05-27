@@ -153,23 +153,17 @@ describe("runCli", () => {
   const stdoutText = (spy: ReturnType<typeof vi.spyOn>): string =>
     spy.mock.calls.map((call) => String(call[0])).join("");
 
-  it("missing required input rejects with Commander error", async () => {
-    let error: unknown;
+  it("missing required input rejects with error and exitCode", async () => {
+    const errorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
 
-    try {
-      await runCli(["node", "cli.js"]);
-    } catch (caught) {
-      error = caught;
-    }
+    await runCli(["node", "cli.js"]);
 
-    expect(
-      error,
-      "runCli should reject when required input is missing",
-    ).toBeInstanceOf(Error);
-    expect(
-      (error as Error).message,
-      `actual error=${error instanceof Error ? error.message : String(error)}`,
-    ).toMatch(/missing required argument/i);
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("input"),
+    );
+    expect(process.exitCode).toBe(1);
   });
 
   it("--help prints help text with all options", async () => {
@@ -183,7 +177,7 @@ describe("runCli", () => {
 
     const help = stdoutText(writeSpy);
 
-    expect(help).toContain("Usage: chromium-ocr [options] <input>");
+    expect(help).toContain("Usage: chromium-ocr [options] [input...]");
     expect(help).toContain("Convert image-only PDFs to searchable PDFs");
     expect(help).toContain("-o, --output <path>");
     expect(help).toContain("--chrome-path <path>");
@@ -209,6 +203,9 @@ describe("runCli", () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
 
     mocks.globMock.mockResolvedValue(["/docs/input.pdf"]);
+    mocks.statSyncMock.mockImplementation(() => {
+      throw new Error("ENOENT");
+    });
 
     await runCli(["node", "cli.js", "/docs/input.pdf"]);
 
@@ -496,5 +493,305 @@ describe("runCli", () => {
         hasValue: false,
       },
     ]);
+  });
+
+  describe("multiple argument inputs", () => {
+    it("multiple file arguments are processed sequentially", async () => {
+      vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+      mocks.globMock.mockImplementation((pattern: string) => {
+        if (pattern === "/docs/a.pdf") return Promise.resolve(["/docs/a.pdf"]);
+        if (pattern === "/docs/b.pdf") return Promise.resolve(["/docs/b.pdf"]);
+        return Promise.resolve([]);
+      });
+
+      await runCli(["node", "cli.js", "/docs/a.pdf", "/docs/b.pdf"]);
+
+      expect(mocks.pipelineInstances[0].convert).toHaveBeenCalledTimes(2);
+      expect(mocks.pipelineInstances[0].convert).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({ inputPath: "/docs/a.pdf" }),
+      );
+      expect(mocks.pipelineInstances[0].convert).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({ inputPath: "/docs/b.pdf" }),
+      );
+    });
+
+    it("glob patterns mixed with file arguments are resolved", async () => {
+      mocks.globMock.mockImplementation((pattern: string) => {
+        if (pattern === "/batch/*.pdf")
+          return Promise.resolve(["/batch/x.pdf", "/batch/y.pdf"]);
+        if (pattern === "/single.pdf") return Promise.resolve(["/single.pdf"]);
+        return Promise.resolve([]);
+      });
+
+      await runCli(["node", "cli.js", "/batch/*.pdf", "/single.pdf"]);
+
+      expect(mocks.pipelineInstances[0].convert).toHaveBeenCalledTimes(3);
+    });
+
+    it("all inputs yield zero files -> error", async () => {
+      const errorSpy = vi
+        .spyOn(console, "error")
+        .mockImplementation(() => undefined);
+
+      mocks.globMock.mockResolvedValue([]);
+
+      await runCli(["node", "cli.js", "/nonexistent1.pdf", "/nonexistent2.pdf"]);
+
+      expect(errorSpy).toHaveBeenCalledWith(
+        "No PDF files found matching the input pattern.",
+      );
+      expect(process.exitCode).toBe(1);
+    });
+
+    it("duplicate paths across inputs are deduplicated", async () => {
+      mocks.globMock.mockImplementation((pattern: string) => {
+        if (pattern === "/docs/a.pdf") return Promise.resolve(["/docs/a.pdf"]);
+        if (pattern === "/docs/*.pdf")
+          return Promise.resolve(["/docs/a.pdf", "/docs/b.pdf"]);
+        return Promise.resolve([]);
+      });
+
+      await runCli(["node", "cli.js", "/docs/a.pdf", "/docs/*.pdf"]);
+
+      const calls = mocks.pipelineInstances[0].convert.mock.calls.map(
+        (c: unknown[]) => (c[0] as ConversionOptionsLike).inputPath,
+      );
+      expect(calls).toEqual(["/docs/a.pdf", "/docs/b.pdf"]);
+    });
+  });
+
+  describe("directory inputs", () => {
+    it("directory input is resolved recursively, --output absent", async () => {
+      vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+      mocks.globMock.mockImplementation((pattern: string) => {
+        if (pattern === "/mydir/**/*.pdf")
+          return Promise.resolve([
+            "/mydir/top.pdf",
+            "/mydir/sub/nested.pdf",
+          ]);
+        return Promise.resolve([]);
+      });
+      mocks.statSyncMock.mockImplementation((p: string) => {
+        if (p === "/mydir") return { isDirectory: () => true } as ReturnType<typeof statSync>;
+        throw new Error("ENOENT");
+      });
+
+      await runCli(["node", "cli.js", "/mydir"]);
+
+      expect(glob).toHaveBeenCalledWith("/mydir/**/*.pdf", {
+        absolute: true,
+        nodir: true,
+      });
+      expect(mocks.pipelineInstances[0].convert).toHaveBeenCalledTimes(2);
+      expect(mocks.pipelineInstances[0].convert).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({
+          inputPath: "/mydir/top.pdf",
+          outputPath: undefined,
+        }),
+      );
+      expect(mocks.pipelineInstances[0].convert).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          inputPath: "/mydir/sub/nested.pdf",
+          outputPath: undefined,
+        }),
+      );
+    });
+
+    it("directory with no PDFs logs error", async () => {
+      const errorSpy = vi
+        .spyOn(console, "error")
+        .mockImplementation(() => undefined);
+
+      mocks.globMock.mockResolvedValue([]);
+      mocks.statSyncMock.mockImplementation((p: string) => {
+        if (p === "/emptydir") return { isDirectory: () => true } as ReturnType<typeof statSync>;
+        throw new Error("ENOENT");
+      });
+
+      await runCli(["node", "cli.js", "/emptydir"]);
+
+      expect(errorSpy).toHaveBeenCalledWith(
+        "No PDF files found matching the input pattern.",
+      );
+      expect(process.exitCode).toBe(1);
+    });
+
+    it("directory + file argument mixed inputs", async () => {
+      mocks.globMock.mockImplementation((pattern: string) => {
+        if (pattern === "/mydir/**/*.pdf")
+          return Promise.resolve(["/mydir/a.pdf"]);
+        if (pattern === "/extra.pdf") return Promise.resolve(["/extra.pdf"]);
+        return Promise.resolve([]);
+      });
+      mocks.statSyncMock.mockImplementation((p: string) => {
+        if (p === "/mydir") return { isDirectory: () => true } as ReturnType<typeof statSync>;
+        throw new Error("ENOENT");
+      });
+
+      await runCli(["node", "cli.js", "/mydir", "/extra.pdf"]);
+
+      const calls = mocks.pipelineInstances[0].convert.mock.calls.map(
+        (c: unknown[]) => (c[0] as ConversionOptionsLike).inputPath,
+      );
+      expect(calls).toEqual(["/mydir/a.pdf", "/extra.pdf"]);
+    });
+  });
+
+  describe("output path with multiple inputs", () => {
+    it("directory + --output directory mirrors structure", async () => {
+      mocks.globMock.mockImplementation((pattern: string) => {
+        if (pattern === "/src/**/*.pdf")
+          return Promise.resolve([
+            "/src/top.pdf",
+            "/src/sub/nested.pdf",
+          ]);
+        return Promise.resolve([]);
+      });
+      mocks.statSyncMock.mockImplementation((p: string) => {
+        if (p === "/src") return { isDirectory: () => true } as ReturnType<typeof statSync>;
+        if (p === "/out") return { isDirectory: () => true } as ReturnType<typeof statSync>;
+        throw new Error("ENOENT");
+      });
+
+      await runCli(["node", "cli.js", "--output", "/out", "/src"]);
+
+      expect(mocks.pipelineInstances[0].convert).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({
+          inputPath: "/src/top.pdf",
+          outputPath: "/out/top_searchable.pdf",
+        }),
+      );
+      expect(mocks.pipelineInstances[0].convert).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          inputPath: "/src/sub/nested.pdf",
+          outputPath: "/out/sub/nested_searchable.pdf",
+        }),
+      );
+    });
+
+    it("multiple files + --output directory", async () => {
+      mocks.globMock.mockImplementation((pattern: string) => {
+        if (pattern === "/docs/a.pdf") return Promise.resolve(["/docs/a.pdf"]);
+        if (pattern === "/docs/b.pdf") return Promise.resolve(["/docs/b.pdf"]);
+        return Promise.resolve([]);
+      });
+      mocks.statSyncMock.mockImplementation((p: string) => {
+        if (p === "/out") return { isDirectory: () => true } as ReturnType<typeof statSync>;
+        throw new Error("ENOENT");
+      });
+
+      await runCli([
+        "node",
+        "cli.js",
+        "--output",
+        "/out",
+        "/docs/a.pdf",
+        "/docs/b.pdf",
+      ]);
+
+      expect(mocks.pipelineInstances[0].convert).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({
+          inputPath: "/docs/a.pdf",
+          outputPath: "/out/a_searchable.pdf",
+        }),
+      );
+      expect(mocks.pipelineInstances[0].convert).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          inputPath: "/docs/b.pdf",
+          outputPath: "/out/b_searchable.pdf",
+        }),
+      );
+    });
+
+    it("multiple inputs + --output existing file path -> error", async () => {
+      const errorSpy = vi
+        .spyOn(console, "error")
+        .mockImplementation(() => undefined);
+
+      mocks.globMock.mockImplementation((pattern: string) => {
+        if (pattern === "/docs/a.pdf") return Promise.resolve(["/docs/a.pdf"]);
+        if (pattern === "/docs/b.pdf") return Promise.resolve(["/docs/b.pdf"]);
+        return Promise.resolve([]);
+      });
+      mocks.statSyncMock.mockImplementation((p: string) => {
+        if (p === "/out/result.pdf")
+          return { isDirectory: () => false } as ReturnType<typeof statSync>;
+        throw new Error("ENOENT");
+      });
+
+      await runCli([
+        "node",
+        "cli.js",
+        "--output",
+        "/out/result.pdf",
+        "/docs/a.pdf",
+        "/docs/b.pdf",
+      ]);
+
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining("--output"),
+      );
+      expect(process.exitCode).toBe(1);
+      expect(ConversionPipeline).not.toHaveBeenCalled();
+    });
+
+    it("multiple inputs + --output non-existent file path -> error", async () => {
+      const errorSpy = vi
+        .spyOn(console, "error")
+        .mockImplementation(() => undefined);
+
+      mocks.globMock.mockImplementation((pattern: string) => {
+        if (pattern === "/docs/a.pdf") return Promise.resolve(["/docs/a.pdf"]);
+        if (pattern === "/docs/b.pdf") return Promise.resolve(["/docs/b.pdf"]);
+        return Promise.resolve([]);
+      });
+      mocks.statSyncMock.mockImplementation(() => {
+        throw new Error("ENOENT");
+      });
+
+      await runCli([
+        "node",
+        "cli.js",
+        "--output",
+        "/out/result.pdf",
+        "/docs/a.pdf",
+        "/docs/b.pdf",
+      ]);
+
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining("--output"),
+      );
+      expect(process.exitCode).toBe(1);
+      expect(ConversionPipeline).not.toHaveBeenCalled();
+    });
+
+    it("single input + --output file path works as before", async () => {
+      mocks.globMock.mockResolvedValue(["/docs/input.pdf"]);
+
+      await runCli([
+        "node",
+        "cli.js",
+        "--output",
+        "/out/searchable.pdf",
+        "/docs/input.pdf",
+      ]);
+
+      expect(mocks.pipelineInstances[0].convert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          inputPath: "/docs/input.pdf",
+          outputPath: "/out/searchable.pdf",
+        }),
+      );
+    });
   });
 });

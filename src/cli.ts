@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { glob } from "glob";
-import { resolve, basename, extname, join } from "node:path";
+import { resolve, basename, extname, join, dirname, relative } from "node:path";
 import { statSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
@@ -52,19 +52,42 @@ export async function runCli(argv: string[]): Promise<void> {
       "Convert image-only PDFs to searchable PDFs using Chrome's built-in OCR (PDFSearchify)",
     )
     .version(pkgVersion)
-    .argument("<input>", "Input PDF file path or glob pattern");
+    .argument("[input...]", "Input PDF file path(s), directories, or glob patterns");
 
   for (const flag of CLI_FLAGS) {
     program.option(flag.flags, flag.description);
   }
 
-  program.action(async (input: string, options: Record<string, unknown>) => {
-      const files = await resolveInputFiles(input);
+  program.action(async (inputs: string[], options: Record<string, unknown>) => {
+      if (inputs.length === 0) {
+        console.error("error: missing required argument 'input'");
+        process.exitCode = 1;
+        return;
+      }
+
+      const files = await resolveInputFiles(inputs);
 
       if (files.length === 0) {
         console.error("No PDF files found matching the input pattern.");
         process.exitCode = 1;
         return;
+      }
+
+      if (files.length > 1 && options.output) {
+        const output = options.output as string;
+        let isDir = false;
+        try {
+          isDir = statSync(output).isDirectory();
+        } catch {
+          // not existing path → treat as file path
+        }
+        if (!isDir) {
+          console.error(
+            `Error: --output file path is not allowed with multiple inputs. Specify a directory instead.`,
+          );
+          process.exitCode = 1;
+          return;
+        }
       }
 
       const searchifyPrinter = new ChromeSearchifyPrinter();
@@ -93,7 +116,7 @@ export async function runCli(argv: string[]): Promise<void> {
       try {
         for (const file of files) {
           const conversionOptions: ConversionOptions = {
-            inputPath: file,
+            inputPath: file.absolutePath,
             outputPath: resolveOutputPath(file, options),
             overwrite: options.overwrite as boolean | undefined,
             verbose: options.verbose as boolean | undefined,
@@ -101,7 +124,7 @@ export async function runCli(argv: string[]): Promise<void> {
           };
 
           if (options.verbose) {
-            console.log(`Processing: ${file}`);
+            console.log(`Processing: ${file.absolutePath}`);
           }
 
           try {
@@ -112,7 +135,7 @@ export async function runCli(argv: string[]): Promise<void> {
           } catch (error: unknown) {
             const message =
               error instanceof Error ? error.message : String(error);
-            console.error(`Failed: ${file}: ${message}`);
+            console.error(`Failed: ${file.absolutePath}: ${message}`);
             process.exitCode = 1;
           }
         }
@@ -126,29 +149,75 @@ export async function runCli(argv: string[]): Promise<void> {
   await program.parseAsync(argv);
 }
 
-async function resolveInputFiles(input: string): Promise<string[]> {
-  const matches = await glob(input.includes("*") ? input : input, {
-    absolute: true,
-    nodir: true,
-  });
-  return matches.filter((f) => f.toLowerCase().endsWith(".pdf"));
+type ResolvedFile = {
+  absolutePath: string;
+  baseDir: string;
+};
+
+async function resolveInputFiles(inputs: string[]): Promise<ResolvedFile[]> {
+  const seen = new Set<string>();
+  const result: ResolvedFile[] = [];
+
+  for (const input of inputs) {
+    const absInput = resolve(input);
+    let isDir = false;
+    const hasGlob = input.includes("*") || input.includes("?");
+    if (!hasGlob) {
+      try {
+        isDir = statSync(absInput).isDirectory();
+      } catch {
+        // not a directory or doesn't exist
+      }
+    }
+
+    let globPattern: string;
+    let baseDir: string;
+
+    if (isDir) {
+      globPattern = join(absInput, "**/*.pdf");
+      baseDir = absInput;
+    } else {
+      globPattern = absInput;
+      baseDir = dirname(absInput);
+    }
+
+    const matches = await glob(globPattern, {
+      absolute: true,
+      nodir: true,
+    });
+
+    for (const match of matches) {
+      if (!match.toLowerCase().endsWith(".pdf")) continue;
+      if (seen.has(match)) continue;
+      seen.add(match);
+      result.push({ absolutePath: match, baseDir });
+    }
+  }
+
+  return result;
 }
 
 function resolveOutputPath(
-  inputFile: string,
+  file: ResolvedFile,
   options: Record<string, unknown>,
 ): string | undefined {
   const output = options.output as string | undefined;
   if (!output) return undefined;
 
+  let isDir = false;
   try {
-    const s = statSync(output);
-    if (s.isDirectory()) {
-      const name = basename(inputFile, extname(inputFile));
-      return join(output, `${name}_searchable.pdf`);
-    }
+    isDir = statSync(output).isDirectory();
   } catch {
     // output path does not exist, treat as file path
+  }
+
+  if (isDir) {
+    const rel = relative(file.baseDir, file.absolutePath);
+    const name = basename(rel, extname(rel));
+    const relDir = dirname(rel);
+    return relDir === "."
+      ? join(output, `${name}_searchable.pdf`)
+      : join(output, relDir, `${name}_searchable.pdf`);
   }
 
   return resolve(output);
