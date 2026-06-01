@@ -13,7 +13,10 @@ import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
 import type { Browser, Frame, Page } from "playwright-core";
-import type { IChromeSearchifyPrinter, SearchifyToFileOptions } from "../types/index.js";
+import type { IChromeSearchifyPrinter, SearchifyToFileOptions, OcrProgressCallback } from "../types/index.js";
+
+const DEFAULT_OCR_BASE_TIMEOUT_MS = 30_000;
+const DEFAULT_OCR_PER_PAGE_TIMEOUT_MS = 3_000;
 import {
   createUploadServer,
   type UploadServerResult,
@@ -117,7 +120,11 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
 
       const searchifyReady = await this.waitForSearchifyComplete(
         viewerFrame,
-        options?.verbose,
+        {
+          verbose: options?.verbose,
+          ocrTimeoutMs: options?.ocrTimeoutMs,
+          onOcrProgress: options?.onOcrProgress,
+        },
       );
 
       if (!searchifyReady) {
@@ -305,8 +312,15 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
 
   private async waitForSearchifyComplete(
     viewerFrame: Frame,
-    verbose?: boolean,
+    options?: {
+      verbose?: boolean;
+      ocrTimeoutMs?: number;
+      onOcrProgress?: OcrProgressCallback;
+    },
   ): Promise<boolean> {
+    const verbose = options?.verbose;
+    const onOcrProgress = options?.onOcrProgress;
+
     const setupResult = await viewerFrame.evaluate(
       /* v8 ignore start -- browser-side callback; not executed in Node.js unit tests */
       async (): Promise<{
@@ -371,6 +385,7 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
     /* v8 ignore end */
 
     const { pageCount, initialHasSearchifyText, doneAfterScroll } = setupResult;
+    const startTime = Date.now();
 
     if (verbose) {
       console.error(
@@ -383,17 +398,18 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
       if (verbose) {
         console.error("[ChromeSearchifyPrinter] OCR already complete after scrolling");
       }
+      onOcrProgress?.({ type: "document-completed", pageCount, elapsedMs: Date.now() - startTime });
       return true;
     }
 
-    const maxWaitMs = 15_000 + pageCount * 3_000;
-    const notStartedThresholdMs = Math.max(15_000, Math.min(60_000, maxWaitMs / 2));
+    const ocrTimeoutMs = options?.ocrTimeoutMs ?? DEFAULT_OCR_BASE_TIMEOUT_MS + pageCount * DEFAULT_OCR_PER_PAGE_TIMEOUT_MS;
+    const notStartedThresholdMs = Math.max(15_000, Math.min(60_000, ocrTimeoutMs / 2));
     const pollIntervalMs = 500;
-    const startTime = Date.now();
     let ocrStarted = false;
+    let documentStartedEmitted = false;
     let pollCount = 0;
 
-    while (Date.now() - startTime < maxWaitMs) {
+    while (Date.now() - startTime < ocrTimeoutMs) {
       const state = await viewerFrame.evaluate((): {
         started: boolean;
         done: boolean;
@@ -417,11 +433,17 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
             `[ChromeSearchifyPrinter] OCR complete after ${Date.now() - startTime}ms`,
           );
         }
+        onOcrProgress?.({ type: "document-completed", pageCount, elapsedMs: Date.now() - startTime });
         return true;
       }
 
       if (state.started) {
         ocrStarted = true;
+      }
+
+      if (!documentStartedEmitted && state.started) {
+        documentStartedEmitted = true;
+        onOcrProgress?.({ type: "document-started", pageCount });
       }
 
       if (!ocrStarted && !state.hasSearchifyText && Date.now() - startTime > notStartedThresholdMs) {
@@ -443,12 +465,14 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
       await new Promise((r) => setTimeout(r, pollIntervalMs));
     }
 
+    const elapsedMs = Date.now() - startTime;
     if (verbose) {
       console.error(
-        `[ChromeSearchifyPrinter] OCR timed out after ${maxWaitMs}ms`,
+        `[ChromeSearchifyPrinter] OCR timed out after ${elapsedMs}ms (timeout: ${ocrTimeoutMs}ms)`,
       );
     }
-    return false;
+    onOcrProgress?.({ type: "timeout", timeoutMs: ocrTimeoutMs, elapsedMs });
+    throw new Error(`OCR timed out after ${elapsedMs}ms (timeout: ${ocrTimeoutMs}ms)`);
   }
 
   private async setupProfile(verbose?: boolean): Promise<string> {

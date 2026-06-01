@@ -1,5 +1,12 @@
 export type PdfKind = "text_only" | "blank" | "image_only" | "mixed" | "unknown";
 
+export type OcrProgressEvent =
+  | { type: "document-started"; pageCount: number }
+  | { type: "document-completed"; pageCount: number; elapsedMs: number }
+  | { type: "timeout"; timeoutMs: number; elapsedMs: number };
+
+export type OcrProgressCallback = (event: OcrProgressEvent) => void;
+
 export interface PdfMetadata {
   pageCount: number;
 }
@@ -27,6 +34,8 @@ export interface ConversionOptions {
   overwrite?: boolean;
   verbose?: boolean;
   chromePath?: string;
+  ocrTimeoutMs?: number;
+  onOcrProgress?: OcrProgressCallback;
 }
 
 export interface SearchifyToFileOptions {
@@ -34,6 +43,8 @@ export interface SearchifyToFileOptions {
   verbose?: boolean;
   saveTimeoutMs?: number;
   uploadTimeoutMs?: number;
+  ocrTimeoutMs?: number;
+  onOcrProgress?: OcrProgressCallback;
 }
 
 export interface IChromeSearchifyPrinter {

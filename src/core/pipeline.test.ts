@@ -149,6 +149,8 @@ describe("ConversionPipeline", () => {
       {
         chromePath: undefined,
         verbose: undefined,
+        ocrTimeoutMs: undefined,
+        onOcrProgress: undefined,
       },
     );
     expect.soft(mocks.fileWriter.ensureDir).toHaveBeenCalledWith(dirname("/output/test.pdf"));
@@ -310,6 +312,8 @@ describe("ConversionPipeline", () => {
       {
         chromePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
         verbose: true,
+        ocrTimeoutMs: undefined,
+        onOcrProgress: undefined,
       },
     );
   });
@@ -344,5 +348,55 @@ describe("ConversionPipeline", () => {
     ).rejects.toThrow("File is not a valid PDF");
 
     expect(mocks.searchifyPrinter.searchifyToFile).not.toHaveBeenCalled();
+  });
+
+  it("passes ocrTimeoutMs and onOcrProgress to searchifyToFile for image-only PDF", async () => {
+    await setupStatForNewOutput(42);
+    (mocks.pdfAnalyzer.analyze as ReturnType<typeof vi.fn>).mockResolvedValue(imageOnlyAnalysis());
+
+    const onOcrProgress = vi.fn();
+
+    await pipeline.convert({
+      inputPath: "/input/test.pdf",
+      outputPath: "/output/test.pdf",
+      ocrTimeoutMs: 60_000,
+      onOcrProgress,
+    });
+
+    expect(mocks.searchifyPrinter.searchifyToFile).toHaveBeenCalledWith(
+      "/input/test.pdf",
+      "/output/test.pdf",
+      {
+        chromePath: undefined,
+        verbose: undefined,
+        ocrTimeoutMs: 60_000,
+        onOcrProgress,
+      },
+    );
+  });
+
+  it("passes ocrTimeoutMs and onOcrProgress to searchifyToFile for mixed PDF", async () => {
+    await setupStatForNewOutput(42);
+    (mocks.pdfAnalyzer.analyze as ReturnType<typeof vi.fn>).mockResolvedValue(mixedAnalysis());
+
+    const onOcrProgress = vi.fn();
+
+    await pipeline.convert({
+      inputPath: "/input/test.pdf",
+      outputPath: "/output/test.pdf",
+      ocrTimeoutMs: 45_000,
+      onOcrProgress,
+    });
+
+    expect(mocks.searchifyPrinter.searchifyToFile).toHaveBeenCalledWith(
+      "/input/test.pdf",
+      "/output/test.pdf",
+      {
+        chromePath: undefined,
+        verbose: undefined,
+        ocrTimeoutMs: 45_000,
+        onOcrProgress,
+      },
+    );
   });
 });

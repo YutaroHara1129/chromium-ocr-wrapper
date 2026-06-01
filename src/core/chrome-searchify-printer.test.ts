@@ -969,9 +969,9 @@ describe("ChromeSearchifyPrinter", () => {
       });
       promise.catch(() => {});
 
-      await advanceUntilSettled(promise, 30_000);
+      await advanceUntilSettled(promise, 45_000);
 
-      await expect(promise).rejects.toThrow("OCR did not produce searchable output");
+      await expect(promise).rejects.toThrow(/OCR timed out after \d+ms \(timeout: 39000ms\)/);
       expect(copyFile).not.toHaveBeenCalled();
       expect(saveMock).not.toHaveBeenCalled();
       expect(chromeProcess.kill).toHaveBeenCalled();
@@ -1033,9 +1033,9 @@ describe("ChromeSearchifyPrinter", () => {
       });
       promise.catch(() => {});
 
-      await advanceUntilSettled(promise, 30_000);
+      await advanceUntilSettled(promise, 45_000);
 
-      await expect(promise).rejects.toThrow("OCR did not produce searchable output");
+      await expect(promise).rejects.toThrow(/OCR timed out after \d+ms \(timeout: 39000ms\)/);
       expect(copyFile).not.toHaveBeenCalled();
       expect(saveMock).not.toHaveBeenCalled();
       expect(rename).not.toHaveBeenCalled();
@@ -1062,9 +1062,9 @@ describe("ChromeSearchifyPrinter", () => {
       });
       promise.catch(() => {});
 
-      await advanceUntilSettled(promise, 30_000);
+      await advanceUntilSettled(promise, 45_000);
 
-      await expect(promise).rejects.toThrow("OCR did not produce searchable output");
+      await expect(promise).rejects.toThrow(/OCR timed out after/);
       expect(errorSpy).toHaveBeenCalledWith(
         expect.stringContaining("Waiting for OCR..."),
       );
@@ -1130,6 +1130,231 @@ describe("ChromeSearchifyPrinter", () => {
       await expect(promise).resolves.toBeUndefined();
       expect(errorSpy).toHaveBeenCalledWith(
         expect.stringContaining("Found 2 frames, waiting for viewer"),
+      );
+    });
+  });
+
+  describe("OCR progress callback", () => {
+    it("emits document-started then document-completed during successful OCR", async () => {
+      vi.useFakeTimers();
+
+      const onOcrProgress = vi.fn();
+      let pollCount = 0;
+      const frame = createSimulatedViewerFrame({
+        pageCount: 3,
+        hasSearchifyText: true,
+        pollingStateFn: () => {
+          pollCount++;
+          if (pollCount <= 1) return { started: false, done: false, hasSearchifyText: false };
+          if (pollCount <= 3) return { started: true, done: false, hasSearchifyText: false };
+          return { started: true, done: true, hasSearchifyText: true };
+        },
+      });
+
+      mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame: frame });
+
+      const promise = printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+        chromePath: "/custom/chrome",
+        onOcrProgress,
+      });
+      promise.catch(() => {});
+
+      await advanceUntilSettled(promise, 10_000);
+
+      await expect(promise).resolves.toBeUndefined();
+
+      const events = onOcrProgress.mock.calls.map(call => call[0]);
+      const startedIdx = events.findIndex((e: { type: string }) => e.type === "document-started");
+      const completedIdx = events.findIndex((e: { type: string }) => e.type === "document-completed");
+
+      expect(startedIdx).toBeGreaterThanOrEqual(0);
+      expect(completedIdx).toBeGreaterThan(startedIdx);
+      expect(events[startedIdx]).toEqual({ type: "document-started", pageCount: 3 });
+      expect(events[completedIdx]).toEqual(
+        expect.objectContaining({ type: "document-completed", pageCount: 3, elapsedMs: expect.any(Number) }),
+      );
+    });
+
+    it("emits document-completed when OCR already complete after scrolling", async () => {
+      const onOcrProgress = vi.fn();
+      const frame = createSimulatedViewerFrame({
+        pageCount: 3,
+        hasSearchifyText: true,
+        progressDoneAfterSetup: true,
+      });
+
+      mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame: frame });
+
+      await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+        chromePath: "/custom/chrome",
+        onOcrProgress,
+      });
+
+      expect(onOcrProgress).toHaveBeenCalledTimes(1);
+      expect(onOcrProgress).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "document-completed", pageCount: 3, elapsedMs: expect.any(Number) }),
+      );
+    });
+
+    it("does not emit events when pageCount is 0", async () => {
+      const onOcrProgress = vi.fn();
+      const frame = createSimulatedViewerFrame({
+        pageCount: 0,
+        hasSearchifyText: false,
+      });
+
+      mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame: frame });
+
+      await expect(
+        printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+          chromePath: "/custom/chrome",
+          onOcrProgress,
+        }),
+      ).rejects.toThrow();
+
+      expect(onOcrProgress).not.toHaveBeenCalled();
+    });
+
+    it("does not emit events when OCR never starts for text-only detection", async () => {
+      vi.useFakeTimers();
+
+      const onOcrProgress = vi.fn();
+      const frame = createSimulatedViewerFrame({
+        pageCount: 3,
+        hasSearchifyText: false,
+        pollingStateFn: () => ({ started: false, done: false, hasSearchifyText: false }),
+      });
+
+      const { page } = createPage(frame);
+      mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame: frame, page });
+
+      const promise = printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+        chromePath: "/custom/chrome",
+        onOcrProgress,
+      });
+      promise.catch(() => {});
+
+      await advanceUntilSettled(promise, 30_000);
+
+      await expect(promise).rejects.toThrow();
+      expect(onOcrProgress).not.toHaveBeenCalled();
+    });
+
+    it("propagates error when progress callback throws", async () => {
+      vi.useFakeTimers();
+
+      const onOcrProgress = vi.fn().mockImplementation((event) => {
+        if (event.type === "document-started") {
+          throw new Error("callback exploded");
+        }
+      });
+
+      let pollCount = 0;
+      const frame = createSimulatedViewerFrame({
+        pageCount: 3,
+        hasSearchifyText: false,
+        pollingStateFn: () => {
+          pollCount++;
+          if (pollCount <= 1) return { started: false, done: false, hasSearchifyText: false };
+          return { started: true, done: false, hasSearchifyText: false };
+        },
+      });
+
+      mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame: frame });
+
+      const promise = printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+        chromePath: "/custom/chrome",
+        onOcrProgress,
+      });
+      promise.catch(() => {});
+
+      await advanceUntilSettled(promise, 10_000);
+
+      await expect(promise).rejects.toThrow("callback exploded");
+    });
+  });
+
+  describe("configurable OCR timeout", () => {
+    it("throws with timeout details and emits timeout event after document-started when OCR exceeds ocrTimeoutMs", async () => {
+      vi.useFakeTimers();
+
+      const onOcrProgress = vi.fn();
+      const frame = createSimulatedViewerFrame({
+        pageCount: 3,
+        hasSearchifyText: false,
+        pollingStateFn: () => ({ started: true, done: false, hasSearchifyText: false }),
+      });
+
+      mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame: frame });
+
+      const promise = printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+        chromePath: "/custom/chrome",
+        ocrTimeoutMs: 5000,
+        onOcrProgress,
+      });
+      promise.catch(() => {});
+
+      await advanceUntilSettled(promise, 15_000);
+
+      await expect(promise).rejects.toThrow(/OCR timed out after \d+ms \(timeout: 5000ms\)/);
+
+      const events = onOcrProgress.mock.calls.map(call => call[0]);
+      const startedIdx = events.findIndex((e: { type: string }) => e.type === "document-started");
+      const timeoutIdx = events.findIndex((e: { type: string }) => e.type === "timeout");
+      expect(startedIdx).toBeGreaterThanOrEqual(0);
+      expect(timeoutIdx).toBeGreaterThan(startedIdx);
+      expect(events[timeoutIdx]).toEqual(
+        expect.objectContaining({ type: "timeout", timeoutMs: 5000, elapsedMs: expect.any(Number) }),
+      );
+    });
+
+    it("does not proceed to save/upload after timeout", async () => {
+      vi.useFakeTimers();
+
+      const frame = createSimulatedViewerFrame({
+        pageCount: 3,
+        hasSearchifyText: false,
+        pollingStateFn: () => ({ started: true, done: false, hasSearchifyText: false }),
+      });
+
+      mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame: frame });
+
+      const promise = printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+        chromePath: "/custom/chrome",
+        ocrTimeoutMs: 5000,
+      });
+      promise.catch(() => {});
+
+      await advanceUntilSettled(promise, 15_000);
+
+      await expect(promise).rejects.toThrow();
+      expect(createUploadServer).not.toHaveBeenCalled();
+    });
+
+    it("uses default timeout formula when ocrTimeoutMs is omitted", async () => {
+      vi.useFakeTimers();
+
+      const onOcrProgress = vi.fn();
+      const frame = createSimulatedViewerFrame({
+        pageCount: 3,
+        hasSearchifyText: false,
+        pollingStateFn: () => ({ started: true, done: false, hasSearchifyText: false }),
+      });
+
+      mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame: frame });
+
+      const promise = printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+        chromePath: "/custom/chrome",
+        onOcrProgress,
+      });
+      promise.catch(() => {});
+
+      const expectedTimeoutMs = 30_000 + 3 * 3_000;
+      await advanceUntilSettled(promise, 45_000);
+
+      await expect(promise).rejects.toThrow(`timeout: ${expectedTimeoutMs}ms`);
+      expect(onOcrProgress).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "timeout", timeoutMs: expectedTimeoutMs }),
       );
     });
   });

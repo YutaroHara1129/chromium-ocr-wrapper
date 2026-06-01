@@ -54,6 +54,8 @@ export class ConversionPipeline implements IConversionPipeline {
         {
           chromePath: options.chromePath,
           verbose: options.verbose,
+          ocrTimeoutMs: options.ocrTimeoutMs,
+          onOcrProgress: options.onOcrProgress,
         },
       );
     }

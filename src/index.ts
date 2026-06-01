@@ -13,4 +13,6 @@ export type {
   PdfAnalysis,
   PdfKind,
   PdfMetadata,
+  OcrProgressEvent,
+  OcrProgressCallback,
 } from "./types/index.js";
