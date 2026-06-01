@@ -945,12 +945,12 @@ describe("ChromeSearchifyPrinter", () => {
       expect(saveMock).toHaveBeenCalledWith("SEARCHIFIED");
     });
 
-    it("throws OCR error when polling only observes hasSearchifyText without a done signal", async () => {
+    it("returns true when hasSearchifyText is true even without done signal", async () => {
       vi.useFakeTimers();
 
       const saveMock = vi.fn().mockResolvedValue({
         dataToSave: new Uint8Array([1, 2, 3]).buffer,
-        fileName: "original.pdf",
+        fileName: "searchified.pdf",
       });
 
       const frame = createSimulatedViewerFrame({
@@ -971,10 +971,8 @@ describe("ChromeSearchifyPrinter", () => {
 
       await advanceUntilSettled(promise, 45_000);
 
-      await expect(promise).rejects.toThrow(/OCR timed out after \d+ms \(timeout: 39000ms\)/);
-      expect(copyFile).not.toHaveBeenCalled();
-      expect(saveMock).not.toHaveBeenCalled();
-      expect(chromeProcess.kill).toHaveBeenCalled();
+      await expect(promise).resolves.toBeUndefined();
+      expect(saveMock).toHaveBeenCalledWith("SEARCHIFIED");
     });
 
     it("throws OCR error when OCR never starts for text-only PDF", async () => {

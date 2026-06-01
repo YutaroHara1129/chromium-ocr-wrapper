@@ -157,7 +157,7 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
 
         if (options?.verbose) {
           console.error(
-            `[ChromeSearchifyPrinter] Received ${tempStats.size} bytes via upload`,
+            `[ChromeSearchifyPrinter] Received ${tempStats.size} bytes via upload (saveType=${uploadResult.saveType})`,
           );
         }
 
@@ -427,10 +427,10 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
         /* v8 ignore end */
       });
 
-      if (state.done) {
+      if (state.done || state.hasSearchifyText) {
         if (verbose) {
           console.error(
-            `[ChromeSearchifyPrinter] OCR complete after ${Date.now() - startTime}ms`,
+            `[ChromeSearchifyPrinter] OCR complete after ${Date.now() - startTime}ms (done=${state.done}, hasSearchifyText=${state.hasSearchifyText})`,
           );
         }
         onOcrProgress?.({ type: "document-completed", pageCount, elapsedMs: Date.now() - startTime });
@@ -458,7 +458,7 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
       pollCount++;
       if (verbose && pollCount % 10 === 0) {
         console.error(
-          `[ChromeSearchifyPrinter] Waiting for OCR... ${Date.now() - startTime}ms elapsed`,
+          `[ChromeSearchifyPrinter] Waiting for OCR... ${Date.now() - startTime}ms elapsed (started=${state.started}, done=${state.done}, hasText=${state.hasSearchifyText})`,
         );
       }
 

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PDFDocument, PDFName, StandardFonts } from "pdf-lib";
 import { beforeEach, describe, expect, it } from "vitest";
-import type { IPdfInfoExtractor, PdfAnalysis } from "../types/index.js";
+import type { IPdfInfoExtractor } from "../types/index.js";
 import { PdfInfoExtractor, extractPageCount, analyzePdfContent } from "./pdf-info.js";
 
 describe("PdfInfoExtractor", () => {
