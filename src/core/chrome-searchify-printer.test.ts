@@ -502,7 +502,6 @@ describe("ChromeSearchifyPrinter", () => {
     await expect(promise).rejects.toThrow("PDF viewer frame not found within 15 seconds");
 
     expect(pageBundle.page.close).toHaveBeenCalled();
-    expect(browser.close).toHaveBeenCalled();
     expect(chromeProcess.kill).toHaveBeenCalled();
     expect(rm).toHaveBeenCalledWith("/tmp/chromium-ocr-test-profile", {
       recursive: true,
@@ -524,7 +523,6 @@ describe("ChromeSearchifyPrinter", () => {
 
     expect(copyFile).not.toHaveBeenCalled();
     expect(rename).not.toHaveBeenCalled();
-    expect(browser.close).toHaveBeenCalled();
     expect(chromeProcess.kill).toHaveBeenCalled();
   });
 
@@ -560,12 +558,11 @@ describe("ChromeSearchifyPrinter", () => {
     await printer.close();
     await printer.close();
 
-    expect(browser.close).toHaveBeenCalledTimes(1);
     expect(chromeProcess.kill).toHaveBeenCalledTimes(1);
     expect(rm).toHaveBeenCalledTimes(1);
   });
 
-  it("close() propagates browser.close() and rm() failures", async () => {
+  it("close() propagates rm() failures, ignoring browser.close() errors", async () => {
     const { page } = createPage();
     const { browser } = createBrowser(page);
     browser.close.mockRejectedValue(new Error("browser close failed"));
@@ -583,11 +580,7 @@ describe("ChromeSearchifyPrinter", () => {
       chromePath: "/custom/chrome",
     });
 
-    await expect(printer.close()).rejects.toSatisfy((err: unknown) => {
-      if (!(err instanceof AggregateError)) return false;
-      return err.errors.some((e) => e.message.includes("browser close failed"))
-        && err.errors.some((e) => e.message.includes("rm failed"));
-    });
+    await expect(printer.close()).rejects.toThrow("rm failed");
   });
 
   it("searchifyToFile cleans up resources when connectOverCDP fails", async () => {
@@ -626,7 +619,6 @@ describe("ChromeSearchifyPrinter", () => {
       printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", { chromePath: "/custom/chrome" }),
     ).rejects.toThrow("goto failed");
 
-    expect(browser.close).toHaveBeenCalled();
     expect(chromeProcess.kill).toHaveBeenCalled();
     expect(rm).toHaveBeenCalledWith("/tmp/chromium-ocr-test-profile", {
       recursive: true,
@@ -677,8 +669,8 @@ describe("ChromeSearchifyPrinter", () => {
       }),
     ).rejects.toThrow("OCR did not produce searchable output");
 
-    expect(saveMock).not.toHaveBeenCalled();
-    expect(browser.close).toHaveBeenCalled();
+    expect(copyFile).not.toHaveBeenCalled();
+    expect(rename).not.toHaveBeenCalled();
     expect(chromeProcess.kill).toHaveBeenCalled();
   });
 
@@ -720,7 +712,6 @@ describe("ChromeSearchifyPrinter", () => {
 
     expect(copyFile).not.toHaveBeenCalled();
     expect(rename).not.toHaveBeenCalled();
-    expect(browser.close).toHaveBeenCalled();
     expect(chromeProcess.kill).toHaveBeenCalled();
   });
 
@@ -744,7 +735,6 @@ describe("ChromeSearchifyPrinter", () => {
     expect(saveMock).toHaveBeenCalledTimes(1);
     expect(copyFile).not.toHaveBeenCalled();
     expect(rename).not.toHaveBeenCalled();
-    expect(browser.close).toHaveBeenCalled();
     expect(chromeProcess.kill).toHaveBeenCalled();
   });
 
@@ -807,7 +797,6 @@ describe("ChromeSearchifyPrinter", () => {
     ).rejects.toThrow("Upload completed but output file is empty");
 
     expect(rename).not.toHaveBeenCalled();
-    expect(browser.close).toHaveBeenCalled();
     expect(chromeProcess.kill).toHaveBeenCalled();
   });
 
@@ -846,7 +835,6 @@ describe("ChromeSearchifyPrinter", () => {
     expect(pageBundle.page.close).toHaveBeenCalled();
     expect(uploadServerClose).not.toHaveBeenCalled();
     expect(unlink).toHaveBeenCalled();
-    expect(browser.close).toHaveBeenCalled();
     expect(chromeProcess.kill).toHaveBeenCalled();
 
     expect(errorSpy).toHaveBeenCalledWith(
@@ -860,7 +848,7 @@ describe("ChromeSearchifyPrinter", () => {
     );
   });
 
-  it("close() rejects when browser.close() times out", async () => {
+  it("close() skips browser.close() after process kill to avoid hangs", async () => {
     const { page } = createPage();
     const { browser } = createBrowser(page);
     browser.close.mockReturnValue(new Promise(() => {}));
@@ -877,15 +865,8 @@ describe("ChromeSearchifyPrinter", () => {
       chromePath: "/custom/chrome",
     });
 
-    vi.useFakeTimers();
-    const closePromise = printer.close();
-    closePromise.catch(() => {});
-    await vi.advanceTimersByTimeAsync(5_100);
-    await expect(closePromise).rejects.toThrow(
-      "browser.close() timed out after 5000ms",
-    );
-    vi.useRealTimers();
-    await new Promise((resolve) => setImmediate(resolve));
+    await expect(printer.close()).resolves.toBeUndefined();
+    expect(browser.close).not.toHaveBeenCalled();
   });
 
   it("logs optional Screen AI profile copy failures in verbose mode", async () => {
@@ -964,7 +945,7 @@ describe("ChromeSearchifyPrinter", () => {
       expect(saveMock).toHaveBeenCalledWith("SEARCHIFIED");
     });
 
-    it("times out when polling only observes hasSearchifyText without a done signal", async () => {
+    it("throws OCR error when polling only observes hasSearchifyText without a done signal", async () => {
       vi.useFakeTimers();
 
       const saveMock = vi.fn().mockResolvedValue({
@@ -991,9 +972,8 @@ describe("ChromeSearchifyPrinter", () => {
       await advanceUntilSettled(promise, 30_000);
 
       await expect(promise).rejects.toThrow("OCR did not produce searchable output");
-      expect(saveMock).not.toHaveBeenCalled();
       expect(copyFile).not.toHaveBeenCalled();
-      expect(browser.close).toHaveBeenCalled();
+      expect(saveMock).not.toHaveBeenCalled();
       expect(chromeProcess.kill).toHaveBeenCalled();
     });
 
@@ -1024,9 +1004,9 @@ describe("ChromeSearchifyPrinter", () => {
       await advanceUntilSettled(promise, 30_000);
 
       await expect(promise).rejects.toThrow("OCR did not produce searchable output");
-      expect(saveMock).not.toHaveBeenCalled();
       expect(copyFile).not.toHaveBeenCalled();
-      expect(browser.close).toHaveBeenCalled();
+      expect(saveMock).not.toHaveBeenCalled();
+      expect(rename).not.toHaveBeenCalled();
       expect(chromeProcess.kill).toHaveBeenCalled();
     });
 
@@ -1056,13 +1036,13 @@ describe("ChromeSearchifyPrinter", () => {
       await advanceUntilSettled(promise, 30_000);
 
       await expect(promise).rejects.toThrow("OCR did not produce searchable output");
-      expect(saveMock).not.toHaveBeenCalled();
       expect(copyFile).not.toHaveBeenCalled();
-      expect(browser.close).toHaveBeenCalled();
+      expect(saveMock).not.toHaveBeenCalled();
+      expect(rename).not.toHaveBeenCalled();
       expect(chromeProcess.kill).toHaveBeenCalled();
     });
 
-    it("logs verbose messages during OCR polling and timeout", async () => {
+    it("logs verbose messages during OCR polling and throws on timeout", async () => {
       vi.useFakeTimers();
 
       const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});

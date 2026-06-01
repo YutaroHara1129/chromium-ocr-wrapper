@@ -1,5 +1,15 @@
+export type PdfKind = "text_only" | "blank" | "image_only" | "mixed" | "unknown";
+
 export interface PdfMetadata {
   pageCount: number;
+}
+
+export interface PdfAnalysis {
+  pageCount: number;
+  kind: PdfKind;
+  hasExtractableText: boolean;
+  hasImages: boolean;
+  pagesNeedingOcr: number;
 }
 
 export interface ConversionResult {
@@ -7,6 +17,8 @@ export interface ConversionResult {
   outputPath: string;
   pageCount: number;
   textSize: number;
+  kind: PdfKind;
+  pagesMadeSearchable: number;
 }
 
 export interface ConversionOptions {
@@ -37,6 +49,10 @@ export interface IChromeSearchifyPrinter {
 
 export interface IPdfInfoExtractor {
   getMetadataFromFile(filePath: string): Promise<PdfMetadata>;
+}
+
+export interface IPdfAnalyzer {
+  analyze(filePath: string): Promise<PdfAnalysis>;
 }
 
 export interface IFileWriter {

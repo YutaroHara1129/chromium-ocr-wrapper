@@ -113,15 +113,12 @@ describe("CLI contract", () => {
     const tempDir = await makeTempDir();
     const invalidPdf = await writeInvalidPdf(join(tempDir, "invalid.pdf"));
 
-    const result = await runCli([
-      invalidPdf,
-      "--chrome-path",
-      "/nonexistent/chrome",
-    ]);
+    const result = await runCli([invalidPdf]);
 
-    expect(result.exitCode).not.toBe(0);
-    expect(result.stderr).toContain("Failed:");
-    expect(result.stderr).toContain("invalid.pdf");
+    const diagnostics = `exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`;
+    expect(result.exitCode, diagnostics).not.toBe(0);
+    expect(result.stderr, diagnostics).toContain("Failed:");
+    expect(result.stderr, diagnostics).toContain("invalid.pdf");
   });
 
   it("non-PDF glob matches are ignored", async () => {
@@ -142,14 +139,13 @@ describe("CLI contract", () => {
       inputPdf,
       "--output",
       outputPdf,
-      "--chrome-path",
-      "/nonexistent/chrome",
     ]);
 
-    expect(result.exitCode).not.toBe(0);
-    expect(result.stderr).toContain("Failed:");
-    expect(result.stderr).toContain("input.pdf");
-    expect(result.stderr).not.toContain("unknown option");
+    const diagnostics = `exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`;
+    expect(result.exitCode, diagnostics).toBe(0);
+    expect(result.stderr, diagnostics).toBe("");
+    expect(result.stdout, diagnostics).toContain("Done:");
+    expect(result.stdout, diagnostics).toContain("custom-output.pdf");
   });
 
   it("multiple files continue after one failure", async () => {
@@ -160,13 +156,13 @@ describe("CLI contract", () => {
 
     const result = await runCli([
       join(tempDir, "*.pdf"),
-      "--chrome-path",
-      "/nonexistent/chrome",
     ]);
 
-    expect(result.exitCode).not.toBe(0);
-    expect(result.stderr).toContain("invalid.pdf");
-    expect(result.stderr).toContain("valid.pdf");
+    const diagnostics = `exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`;
+    expect(result.exitCode, diagnostics).not.toBe(0);
+    expect(result.stderr, diagnostics).toContain("invalid.pdf");
+    expect(result.stdout, diagnostics).toContain("Done:");
+    expect(result.stdout, diagnostics).toContain("valid.pdf");
   });
 
   it("rejects --output file path with multiple explicit file inputs", async () => {
@@ -200,15 +196,14 @@ describe("CLI contract", () => {
       join(tempDir, "two.pdf"),
       "--output",
       outputDir,
-      "--chrome-path",
-      "/nonexistent/chrome",
     ]);
 
-    expect(result.exitCode).not.toBe(0);
-    expect(result.stderr).toContain("Failed:");
-    expect(result.stderr).toContain("one.pdf");
-    expect(result.stderr).toContain("two.pdf");
-    expect(result.stderr).not.toContain("--output file path is not allowed");
+    const diagnostics = `exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`;
+    expect(result.exitCode, diagnostics).toBe(0);
+    expect(result.stderr, diagnostics).toBe("");
+    expect(result.stdout, diagnostics).toContain("one.pdf");
+    expect(result.stdout, diagnostics).toContain("two.pdf");
+    expect(result.stderr, diagnostics).not.toContain("--output file path is not allowed");
   });
 
   it("directory input discovers PDFs recursively", async () => {
@@ -218,16 +213,14 @@ describe("CLI contract", () => {
     await createTextPdf(join(tempDir, "root.pdf"), "Root");
     await createTextPdf(join(nestedDir, "child.pdf"), "Child");
 
-    const result = await runCli([
-      tempDir,
-      "--chrome-path",
-      "/nonexistent/chrome",
-    ]);
+    const result = await runCli([tempDir]);
 
-    expect(result.exitCode).not.toBe(0);
-    expect(result.stderr).toContain("root.pdf");
-    expect(result.stderr).toContain("child.pdf");
-    expect(result.stderr).not.toContain("No PDF files found");
+    const diagnostics = `exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`;
+    expect(result.exitCode, diagnostics).toBe(0);
+    expect(result.stderr, diagnostics).toBe("");
+    expect(result.stdout, diagnostics).toContain("root.pdf");
+    expect(result.stdout, diagnostics).toContain("child.pdf");
+    expect(result.stderr, diagnostics).not.toContain("No PDF files found");
   });
 
   it("directory input ignores non-PDF files", async () => {
@@ -235,15 +228,12 @@ describe("CLI contract", () => {
     await createTextPdf(join(tempDir, "input.pdf"), "Input");
     await writeFile(join(tempDir, "notes.txt"), "not a pdf", "utf8");
 
-    const result = await runCli([
-      tempDir,
-      "--chrome-path",
-      "/nonexistent/chrome",
-    ]);
+    const result = await runCli([tempDir]);
 
-    expect(result.exitCode).not.toBe(0);
-    expect(result.stderr).toContain("input.pdf");
-    expect(result.stderr).not.toContain("No PDF files found");
+    const diagnostics = `exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`;
+    expect(result.exitCode, diagnostics).toBe(0);
+    expect(result.stdout, diagnostics).toContain("input.pdf");
+    expect(result.stderr, diagnostics).not.toContain("No PDF files found");
   });
 
   it("exits with error for empty directory input", async () => {
@@ -264,13 +254,12 @@ describe("CLI contract", () => {
     const result = await runCli([
       join(tempDir, "dup.pdf"),
       join(tempDir, "*.pdf"),
-      "--chrome-path",
-      "/nonexistent/chrome",
     ]);
 
-    expect(result.exitCode).not.toBe(0);
-    expect(result.stderr).toContain("dup.pdf");
-    expect((result.stderr.match(/Failed:/g) ?? []).length).toBe(1);
+    const diagnostics = `exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`;
+    expect(result.exitCode, diagnostics).toBe(0);
+    expect(result.stdout, diagnostics).toContain("dup.pdf");
+    expect((result.stdout.match(/Done:/g) ?? []).length).toBe(1);
   });
 
   it("mixed directory and explicit file inputs are accepted", async () => {
@@ -283,14 +272,13 @@ describe("CLI contract", () => {
     const result = await runCli([
       dirInput,
       join(tempDir, "explicit.pdf"),
-      "--chrome-path",
-      "/nonexistent/chrome",
     ]);
 
-    expect(result.exitCode).not.toBe(0);
-    expect(result.stderr).toContain("from-directory.pdf");
-    expect(result.stderr).toContain("explicit.pdf");
-    expect(result.stderr).not.toContain("No PDF files found");
+    const diagnostics = `exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`;
+    expect(result.exitCode, diagnostics).toBe(0);
+    expect(result.stdout, diagnostics).toContain("from-directory.pdf");
+    expect(result.stdout, diagnostics).toContain("explicit.pdf");
+    expect(result.stderr, diagnostics).not.toContain("No PDF files found");
   });
 
   it("package bin aliases both work", async () => {

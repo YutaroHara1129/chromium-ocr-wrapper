@@ -91,11 +91,11 @@ export async function runCli(argv: string[]): Promise<void> {
       }
 
       const searchifyPrinter = new ChromeSearchifyPrinter();
-      const pdfInfoExtractor = new PdfInfoExtractor();
+      const pdfAnalyzer = new PdfInfoExtractor();
       const fileWriter = new NodeFileWriter();
       const pipeline = new ConversionPipeline(
         searchifyPrinter,
-        pdfInfoExtractor,
+        pdfAnalyzer,
         fileWriter,
       );
 
@@ -129,8 +129,12 @@ export async function runCli(argv: string[]): Promise<void> {
 
           try {
             const result = await pipeline.convert(conversionOptions);
+            const ocrNote =
+              result.kind === "text_only" || result.kind === "blank"
+                ? "OCR not needed"
+                : `${result.pagesMadeSearchable} pages made searchable`;
             console.log(
-              `Done: ${result.inputPath} -> ${result.outputPath} (${result.pageCount} pages, ${result.textSize} bytes)`,
+              `Done: ${result.inputPath} -> ${result.outputPath} (${result.pageCount} pages, ${ocrNote})`,
             );
           } catch (error: unknown) {
             const message =

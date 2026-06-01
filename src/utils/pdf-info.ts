@@ -1,16 +1,21 @@
 import { readFile } from "node:fs/promises";
 import { inflateSync } from "node:zlib";
-import type { IPdfInfoExtractor, PdfMetadata } from "../types/index.js";
+import type { IPdfInfoExtractor, IPdfAnalyzer, PdfMetadata, PdfAnalysis, PdfKind } from "../types/index.js";
 
 const MAX_DECOMPRESSED_STREAM_SIZE = 256 * 1024;
 
 const MAX_TOTAL_BUDGET = 2 * 1024 * 1024;
 
-export class PdfInfoExtractor implements IPdfInfoExtractor {
+export class PdfInfoExtractor implements IPdfInfoExtractor, IPdfAnalyzer {
   async getMetadataFromFile(filePath: string): Promise<PdfMetadata> {
     const buffer = await readFile(filePath);
     const pageCount = extractPageCount(buffer);
     return { pageCount };
+  }
+
+  async analyze(filePath: string): Promise<PdfAnalysis> {
+    const buffer = await readFile(filePath);
+    return analyzePdfContent(buffer);
   }
 }
 
@@ -100,4 +105,70 @@ function* flateStreamIterator(
       continue;
     }
   }
+}
+
+const FONT_INDICATOR = /\/BaseFont\b/;
+const IMAGE_INDICATOR = /\/Subtype\s*\/Image\b/;
+
+export function analyzePdfContent(buffer: Buffer): PdfAnalysis {
+  const text = buffer.toString("latin1");
+
+  if (buffer.length === 0) {
+    return {
+      pageCount: 0,
+      kind: "blank",
+      hasExtractableText: false,
+      hasImages: false,
+      pagesNeedingOcr: 0,
+    };
+  }
+
+  if (!text.startsWith("%PDF-")) {
+    return {
+      pageCount: 0,
+      kind: "unknown",
+      hasExtractableText: false,
+      hasImages: false,
+      pagesNeedingOcr: 0,
+    };
+  }
+
+  const pageCount = extractPageCount(buffer);
+
+  let hasExtractableText = FONT_INDICATOR.test(text);
+  let hasImages = IMAGE_INDICATOR.test(text);
+
+  if (!hasExtractableText || !hasImages) {
+    let totalDecompressed = 0;
+    for (const streamText of flateStreamIterator(text, buffer)) {
+      totalDecompressed += streamText.length;
+      if (totalDecompressed > MAX_TOTAL_BUDGET) break;
+
+      if (!hasExtractableText && FONT_INDICATOR.test(streamText)) {
+        hasExtractableText = true;
+      }
+      if (!hasImages && IMAGE_INDICATOR.test(streamText)) {
+        hasImages = true;
+      }
+      if (hasExtractableText && hasImages) break;
+    }
+  }
+
+  const kind = classifyPdfKind(hasExtractableText, hasImages, pageCount);
+  const pagesNeedingOcr =
+    kind === "image_only" || kind === "mixed" ? pageCount : 0;
+
+  return { pageCount, kind, hasExtractableText, hasImages, pagesNeedingOcr };
+}
+
+function classifyPdfKind(
+  hasText: boolean,
+  hasImages: boolean,
+  pageCount: number,
+): PdfKind {
+  if (pageCount === 0) return "blank";
+  if (hasText && hasImages) return "mixed";
+  if (hasText) return "text_only";
+  if (hasImages) return "image_only";
+  return "blank";
 }

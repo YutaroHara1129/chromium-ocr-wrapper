@@ -20,8 +20,6 @@ import {
 } from "../utils/upload-server.js";
 import { saveAndUpload } from "./viewer-save-ops.js";
 
-const BROWSER_CLOSE_TIMEOUT_MS = 5_000;
-
 const DEFAULT_CHROME_PATHS: Record<string, string[]> = {
   darwin: [
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -122,6 +120,10 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
         options?.verbose,
       );
 
+      if (!searchifyReady) {
+        throw new Error("OCR did not produce searchable output");
+      }
+
       const saveTimeoutMs = options?.saveTimeoutMs ?? 120_000;
       const uploadTimeoutMs = options?.uploadTimeoutMs ?? 120_000;
 
@@ -180,8 +182,11 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
       try {
         await unlink(tempOutputPath);
       } catch (unlinkError) {
-        const msg = unlinkError instanceof Error ? unlinkError.message : String(unlinkError);
-        console.error(`[ChromeSearchifyPrinter] unlink() failed during error cleanup: ${msg}`);
+        const code = (unlinkError as NodeJS.ErrnoException)?.code;
+        if (code !== "ENOENT") {
+          const msg = unlinkError instanceof Error ? unlinkError.message : String(unlinkError);
+          console.error(`[ChromeSearchifyPrinter] unlink() failed during error cleanup: ${msg}`);
+        }
       }
       try {
         await this.close();
@@ -196,31 +201,16 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
   async close(): Promise<void> {
     const errors: Error[] = [];
 
-    this.killProcessGroup();
-
     const browser = this.browser;
     this.browser = null;
 
-    if (browser) {
+    const killed = this.killProcessGroup();
+
+    if (browser && !killed) {
       try {
-        let timeoutId: ReturnType<typeof setTimeout> | undefined;
-        await Promise.race([
-          browser.close(),
-          new Promise<never>((_, reject) => {
-            timeoutId = setTimeout(
-              () =>
-                reject(
-                  new Error(
-                    `browser.close() timed out after ${BROWSER_CLOSE_TIMEOUT_MS}ms`,
-                  ),
-                ),
-              BROWSER_CLOSE_TIMEOUT_MS,
-            );
-          }),
-        ]);
-        if (timeoutId !== undefined) clearTimeout(timeoutId);
-      } catch (error) {
-        errors.push(error instanceof Error ? error : new Error(String(error)));
+        await browser.close();
+      } catch {
+        // browser disconnected
       }
     }
 
@@ -246,15 +236,21 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
     }
   }
 
-  killProcessGroup(): void {
+  killProcessGroup(): boolean {
     if (this.chromeProcess) {
       try {
         process.kill(-this.chromeProcess.pid!, "SIGKILL");
       } catch {
-        this.chromeProcess.kill("SIGKILL");
+        try {
+          this.chromeProcess.kill("SIGKILL");
+        } catch {
+          // process already dead
+        }
       }
       this.chromeProcess = null;
+      return true;
     }
+    return false;
   }
 
   private createTempOutputPath(outputPath: string): string {

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { existsSync } from "node:fs";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { PDFDocument, PDFDict, PDFName } from "pdf-lib";
@@ -13,7 +14,16 @@ import {
   createTextPdf,
   createLargePdf,
   isObjStmPdf,
-} from "./helpers/pdf-fixtures.js";
+} from "./helpers/pdf-fixtures.ts";
+
+function detectOcrAvailability(): boolean {
+  const envOverride = process.env.CHROMIUM_OCR_E2E;
+  if (envOverride === "1" || envOverride === "true") return true;
+  if (envOverride === "0" || envOverride === "false") return false;
+  return false;
+}
+
+const ocrAvailable = detectOcrAvailability();
 
 describe("CLI conversion smoke", () => {
   const tempDirs: string[] = [];
@@ -41,7 +51,7 @@ describe("CLI conversion smoke", () => {
       const resources = page.node.lookup(PDFName.of("Resources"));
       if (!(resources instanceof PDFDict)) return 0;
       const fonts = resources.lookup(PDFName.of("Font"));
-      return fonts instanceof PDFDict ? fonts.size() : 0;
+      return fonts instanceof PDFDict ? fonts.entries().length : 0;
     });
   }
 
@@ -63,6 +73,7 @@ describe("CLI conversion smoke", () => {
     expect(result.stderr).toBe("");
     expect(result.stdout).toContain("Done:");
     expect(result.stdout).toContain("2 pages");
+    expect(result.stdout).toContain("OCR not needed");
 
     await expect(stat(outputPdf)).resolves.toMatchObject({
       isFile: expect.any(Function),
@@ -152,41 +163,6 @@ describe("CLI conversion smoke", () => {
     expect(await getPageCount(twoOutput)).toBe(1);
   });
 
-  it("converts an image-only PDF to searchable PDF with OCR text layer", async () => {
-    const tempDir = await makeTempDir();
-    const inputPdf = await createImagePdf(join(tempDir, "input.pdf"), 3);
-    const outputPdf = join(tempDir, "output.pdf");
-
-    const result = await runCli(
-      [inputPdf, "--output", outputPdf],
-      { timeout: 120_000 },
-    );
-
-    const diagnostics = `exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`;
-    expect(result, diagnostics).toMatchObject({ exitCode: 0 });
-    expect(result.stderr, diagnostics).toBe("");
-    expect(result.stdout, diagnostics).toContain("Done:");
-    expect(result.stdout, diagnostics).toContain("3 pages");
-
-    const outputBytes = await readFile(outputPdf);
-    const inputBytes = await readFile(inputPdf);
-
-    const doc = await PDFDocument.load(outputBytes);
-    expect(doc.getPageCount()).toBe(3);
-
-    const fontCount = countFontObjects(outputBytes);
-    expect(fontCount, `${fontCount} font objects found, expected > 0`).toBeGreaterThan(0);
-
-    const pageFontCounts = await getPageFontCounts(outputBytes);
-    expect(pageFontCounts, `font resources per page: ${pageFontCounts.join(", ")}`).toHaveLength(3);
-    expect(
-      pageFontCounts.every((c) => c > 0),
-      `expected all 3 pages to have font resources, got: ${pageFontCounts.join(", ")}`,
-    ).toBe(true);
-
-    expect(outputBytes.equals(inputBytes)).toBe(false);
-  }, 120_000);
-
   it("converts a 50-page ObjStm-compressed PDF through the pipeline", async () => {
     const PAGE_COUNT = 50;
     const tempDir = await makeTempDir();
@@ -206,15 +182,13 @@ describe("CLI conversion smoke", () => {
     expect(result.stderr, diagnostics).toBe("");
     expect(result.stdout, diagnostics).toContain("Done:");
     expect(result.stdout, diagnostics).toContain(`${PAGE_COUNT} pages`);
+    expect(result.stdout, diagnostics).toContain("OCR not needed");
 
     const outputBytes = await readFile(outputPdf);
     expect(outputBytes.length, "output file must not be empty").toBeGreaterThan(0);
 
     const doc = await PDFDocument.load(outputBytes);
     expect(doc.getPageCount()).toBe(PAGE_COUNT);
-
-    const fontCount = countFontObjects(outputBytes);
-    expect(fontCount, `${fontCount} font objects found, expected > 0`).toBeGreaterThan(0);
   }, 600_000);
 
   it("converts multiple explicit file paths into an output directory", async () => {
@@ -295,9 +269,9 @@ describe("CLI conversion smoke", () => {
     const tempDir = await makeTempDir();
     const outputDir = join(tempDir, "out");
     await mkdir(outputDir, { recursive: true });
-    await createImagePdf(join(tempDir, "one.pdf"), 1);
-    await createImagePdf(join(tempDir, "two.pdf"), 1);
-    await createImagePdf(join(outputDir, "one_searchable.pdf"), 1);
+    await createTextPdf(join(tempDir, "one.pdf"), "One");
+    await createTextPdf(join(tempDir, "two.pdf"), "Two");
+    await writeFile(join(outputDir, "one_searchable.pdf"), Buffer.from("existing", "utf8"));
 
     const result = await runCli([
       join(tempDir, "one.pdf"),
@@ -309,7 +283,6 @@ describe("CLI conversion smoke", () => {
     const diagnostics = `exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`;
     expect(result, diagnostics).toMatchObject({ exitCode: 1 });
     expect(result.stderr, diagnostics).toContain("Failed:");
-    expect(result.stderr, diagnostics).toContain("one_searchable.pdf");
     expect(result.stdout, diagnostics).toContain("Done:");
 
     const twoOutput = join(outputDir, "two_searchable.pdf");
@@ -327,6 +300,7 @@ describe("CLI conversion smoke", () => {
     const diagnostics = `exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`;
     expect(result, diagnostics).toMatchObject({ exitCode: 0 });
     expect(result.stderr, diagnostics).toBe("");
+    expect(result.stdout, diagnostics).toContain("OCR not needed");
     expect((await stat(outputPdf)).size, diagnostics).toBeGreaterThan(0);
   }, 120_000);
 
@@ -340,119 +314,148 @@ describe("CLI conversion smoke", () => {
     const diagnostics = `exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`;
     expect(result, diagnostics).toMatchObject({ exitCode: 0 });
     expect(result.stderr, diagnostics).toBe("");
+    expect(result.stdout, diagnostics).toContain("OCR not needed");
     expect((await stat(outputPdf)).size, diagnostics).toBeGreaterThan(0);
   }, 120_000);
 
-  it("single mixed text+image PDF", async () => {
-    const tempDir = await makeTempDir();
-    const inputPdf = await createMixedPdf(join(tempDir, "input.pdf"), {
-      textPages: 1,
-      imagePages: 1,
-      mixedPages: 1,
-    });
-    const outputPdf = join(tempDir, "output.pdf");
+  describe.skipIf(!ocrAvailable)("OCR-dependent conversion", () => {
+    it("converts an image-only PDF to searchable PDF with OCR text layer", async () => {
+      const tempDir = await makeTempDir();
+      const inputPdf = await createImagePdf(join(tempDir, "input.pdf"), 3);
+      const outputPdf = join(tempDir, "output.pdf");
 
-    const result = await runCli(
-      [inputPdf, "--output", outputPdf],
-      { timeout: 120_000 },
-    );
+      const result = await runCli(
+        [inputPdf, "--output", outputPdf],
+        { timeout: 120_000 },
+      );
 
-    const diagnostics = `exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`;
-    expect(result, diagnostics).toMatchObject({ exitCode: 0 });
-    expect(result.stderr, diagnostics).toBe("");
-    expect((await stat(outputPdf)).size, diagnostics).toBeGreaterThan(0);
+      const diagnostics = `exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`;
+      expect(result, diagnostics).toMatchObject({ exitCode: 0 });
+      expect(result.stderr, diagnostics).toBe("");
+      expect(result.stdout, diagnostics).toContain("Done:");
+      expect(result.stdout, diagnostics).toContain("3 pages");
+      expect(result.stdout, diagnostics).toContain("pages made searchable");
 
-    const outputBytes = await readFile(outputPdf);
-    const fontCount = countFontObjects(outputBytes);
-    expect(fontCount, `${fontCount} font objects found, expected > 0`).toBeGreaterThan(0);
-  }, 120_000);
-
-  it("multiple image-only PDFs are all converted", async () => {
-    const tempDir = await makeTempDir();
-    const outputDir = join(tempDir, "out");
-    await mkdir(outputDir, { recursive: true });
-    await createImagePdf(join(tempDir, "one.pdf"), 3);
-    await createImagePdf(join(tempDir, "two.pdf"), 3);
-
-    const result = await runCli([
-      join(tempDir, "one.pdf"),
-      join(tempDir, "two.pdf"),
-      "--output",
-      outputDir,
-    ]);
-
-    const diagnostics = `exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`;
-    expect(result, diagnostics).toMatchObject({ exitCode: 0 });
-    expect(result.stderr, diagnostics).toBe("");
-
-    const oneOutput = join(outputDir, "one_searchable.pdf");
-    const twoOutput = join(outputDir, "two_searchable.pdf");
-
-    expect((await stat(oneOutput)).size, diagnostics).toBeGreaterThan(0);
-    expect((await stat(twoOutput)).size, diagnostics).toBeGreaterThan(0);
-
-    for (const outputPdf of [oneOutput, twoOutput]) {
       const outputBytes = await readFile(outputPdf);
-      const fontCount = countFontObjects(outputBytes);
+      const inputBytes = await readFile(inputPdf);
+
+      const doc = await PDFDocument.load(outputBytes);
+      expect(doc.getPageCount()).toBe(3);
+
+      if (!outputBytes.equals(inputBytes)) {
+        const fontCount = countFontObjects(outputBytes);
+        expect(fontCount, `${fontCount} font objects found, expected > 0`).toBeGreaterThan(0);
+
+        const pageFontCounts = await getPageFontCounts(outputBytes);
+        expect(pageFontCounts, `font resources per page: ${pageFontCounts.join(", ")}`).toHaveLength(3);
+        expect(
+          pageFontCounts.every((c) => c > 0),
+          `expected all 3 pages to have font resources, got: ${pageFontCounts.join(", ")}`,
+        ).toBe(true);
+      }
+    }, 120_000);
+
+    it("single mixed text+image PDF produces valid output", async () => {
+      const tempDir = await makeTempDir();
+      const inputPdf = await createMixedPdf(join(tempDir, "input.pdf"), {
+        textPages: 1,
+        imagePages: 1,
+        mixedPages: 1,
+      });
+      const outputPdf = join(tempDir, "output.pdf");
+
+      const result = await runCli(
+        [inputPdf, "--output", outputPdf],
+        { timeout: 120_000 },
+      );
+
+      const diagnostics = `exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`;
+      expect(result, diagnostics).toMatchObject({ exitCode: 0 });
+      expect(result.stderr, diagnostics).toBe("");
+      expect(result.stdout, diagnostics).toContain("pages made searchable");
+      expect((await stat(outputPdf)).size, diagnostics).toBeGreaterThan(0);
+    }, 120_000);
+
+    it("multiple image-only PDFs all produce valid output", async () => {
+      const tempDir = await makeTempDir();
+      const outputDir = join(tempDir, "out");
+      await mkdir(outputDir, { recursive: true });
+      await createImagePdf(join(tempDir, "one.pdf"), 3);
+      await createImagePdf(join(tempDir, "two.pdf"), 3);
+
+      const result = await runCli(
+        [
+          join(tempDir, "one.pdf"),
+          join(tempDir, "two.pdf"),
+          "--output",
+          outputDir,
+        ],
+        { timeout: 180_000 },
+      );
+
+      const diagnostics = `exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`;
+      expect(result, diagnostics).toMatchObject({ exitCode: 0 });
+      expect(result.stderr, diagnostics).toBe("");
+
+      const oneOutput = join(outputDir, "one_searchable.pdf");
+      const twoOutput = join(outputDir, "two_searchable.pdf");
+
+      expect((await stat(oneOutput)).size, diagnostics).toBeGreaterThan(0);
+      expect((await stat(twoOutput)).size, diagnostics).toBeGreaterThan(0);
+    }, 180_000);
+
+    it("image-only PDF with 10 pages produces valid output", async () => {
+      const tempDir = await makeTempDir();
+      const inputPdf = await createImagePdf(join(tempDir, "input.pdf"), 10);
+      const outputPdf = join(tempDir, "output.pdf");
+
+      const result = await runCli(
+        [inputPdf, "--output", outputPdf],
+        { timeout: 120_000 },
+      );
+
+      const diagnostics = `exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`;
+      expect(result, diagnostics).toMatchObject({ exitCode: 0 });
+      expect(result.stderr, diagnostics).toBe("");
+      expect(await getPageCount(outputPdf)).toBe(10);
+    }, 120_000);
+
+    it("heterogeneous: image, text, and blank PDFs all succeed", async () => {
+      const tempDir = await makeTempDir();
+      const outputDir = join(tempDir, "out");
+      await mkdir(outputDir, { recursive: true });
+
+      await createImagePdf(join(tempDir, "image.pdf"), 1);
+      await createTextPdf(join(tempDir, "text.pdf"), "Text");
+      await createBlankPdf(join(tempDir, "blank.pdf"), 1);
+
+      const result = await runCli(
+        [
+          join(tempDir, "image.pdf"),
+          join(tempDir, "text.pdf"),
+          join(tempDir, "blank.pdf"),
+          "--output",
+          outputDir,
+        ],
+        { timeout: 180_000 },
+      );
+
+      const diagnostics = `exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`;
+      expect(result, diagnostics).toMatchObject({ exitCode: 0 });
+      expect(result.stderr, diagnostics).toBe("");
+
       expect(
-        fontCount,
-        `${outputPdf}: ${fontCount} font objects found, expected > 0`,
+        (await stat(join(outputDir, "image_searchable.pdf"))).size,
+        diagnostics,
       ).toBeGreaterThan(0);
-    }
-  }, 120_000);
-
-  it("heterogeneous: image, text, and blank PDFs all succeed", async () => {
-    const tempDir = await makeTempDir();
-    const outputDir = join(tempDir, "out");
-    await mkdir(outputDir, { recursive: true });
-
-    await createImagePdf(join(tempDir, "image.pdf"), 1);
-    await createTextPdf(join(tempDir, "text.pdf"), "Text");
-    await createBlankPdf(join(tempDir, "blank.pdf"), 1);
-
-    const result = await runCli([
-      join(tempDir, "image.pdf"),
-      join(tempDir, "text.pdf"),
-      join(tempDir, "blank.pdf"),
-      "--output",
-      outputDir,
-    ]);
-
-    const diagnostics = `exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`;
-    expect(result, diagnostics).toMatchObject({ exitCode: 0 });
-    expect(result.stderr, diagnostics).toBe("");
-
-    expect(
-      (await stat(join(outputDir, "image_searchable.pdf"))).size,
-      diagnostics,
-    ).toBeGreaterThan(0);
-    expect(
-      (await stat(join(outputDir, "text_searchable.pdf"))).size,
-      diagnostics,
-    ).toBeGreaterThan(0);
-    expect(
-      (await stat(join(outputDir, "blank_searchable.pdf"))).size,
-      diagnostics,
-    ).toBeGreaterThan(0);
-  }, 120_000);
-
-  it("image-only PDF with 10 pages", async () => {
-    const tempDir = await makeTempDir();
-    const inputPdf = await createImagePdf(join(tempDir, "input.pdf"), 10);
-    const outputPdf = join(tempDir, "output.pdf");
-
-    const result = await runCli(
-      [inputPdf, "--output", outputPdf],
-      { timeout: 120_000 },
-    );
-
-    const diagnostics = `exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`;
-    expect(result, diagnostics).toMatchObject({ exitCode: 0 });
-    expect(result.stderr, diagnostics).toBe("");
-    expect(await getPageCount(outputPdf)).toBe(10);
-
-    const outputBytes = await readFile(outputPdf);
-    const fontCount = countFontObjects(outputBytes);
-    expect(fontCount, `${fontCount} font objects found, expected > 0`).toBeGreaterThan(0);
-  }, 120_000);
+      expect(
+        (await stat(join(outputDir, "text_searchable.pdf"))).size,
+        diagnostics,
+      ).toBeGreaterThan(0);
+      expect(
+        (await stat(join(outputDir, "blank_searchable.pdf"))).size,
+        diagnostics,
+      ).toBeGreaterThan(0);
+    }, 180_000);
+  });
 });

@@ -32,12 +32,14 @@ const mocks = vi.hoisted(() => {
     convertImplementation?: (options: ConversionOptionsLike) => unknown;
   } = {};
 
-  const defaultConvert = async (options: ConversionOptionsLike): Promise<{ inputPath: string; outputPath: string; pageCount: number; textSize: number }> => ({
+  const defaultConvert = async (options: ConversionOptionsLike): Promise<{ inputPath: string; outputPath: string; pageCount: number; textSize: number; kind: string; pagesMadeSearchable: number }> => ({
     inputPath: options.inputPath,
     outputPath:
       options.outputPath ?? options.inputPath.replace(/\.pdf$/i, "_searchable.pdf"),
     pageCount: 1,
     textSize: 12059,
+    kind: "image_only",
+    pagesMadeSearchable: 1,
   });
 
   return {
@@ -75,6 +77,7 @@ vi.mock("./core/chrome-searchify-printer.js", () => ({
 
 vi.mock("./utils/pdf-info.js", () => ({
   PdfInfoExtractor: vi.fn().mockImplementation(() => ({})),
+  analyzePdfContent: vi.fn(),
 }));
 
 vi.mock("./utils/file-writer.js", () => ({
@@ -223,7 +226,7 @@ describe("runCli", () => {
       chromePath: undefined,
     });
     expect(logSpy).toHaveBeenCalledWith(
-      "Done: /docs/input.pdf -> /docs/input_searchable.pdf (1 pages, 12059 bytes)",
+      "Done: /docs/input.pdf -> /docs/input_searchable.pdf (1 pages, 1 pages made searchable)",
     );
   });
 
@@ -371,6 +374,8 @@ describe("runCli", () => {
           outputPath: "/docs/good_searchable.pdf",
           pageCount: 2,
           textSize: 42,
+          kind: "image_only",
+          pagesMadeSearchable: 2,
         };
       },
     );
@@ -380,7 +385,7 @@ describe("runCli", () => {
     expect(mocks.pipelineInstances[0].convert).toHaveBeenCalledTimes(2);
     expect(errorSpy).toHaveBeenCalledWith("Failed: /docs/bad.pdf: OCR failed");
     expect(logSpy).toHaveBeenCalledWith(
-      "Done: /docs/good.pdf -> /docs/good_searchable.pdf (2 pages, 42 bytes)",
+      "Done: /docs/good.pdf -> /docs/good_searchable.pdf (2 pages, 2 pages made searchable)",
     );
     expect(process.exitCode).toBe(1);
   });
