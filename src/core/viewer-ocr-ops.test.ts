@@ -133,12 +133,24 @@ describe("setupProgressInterceptor", () => {
     expect(progress.done).toBe(true);
   });
 
-  it("does not alter progress for unrelated message types", () => {
+  it("sets done=true on setHasSearchifyText", () => {
     const controller = createController();
     setupProgressInterceptor(controller, progress);
 
     controller.handlePluginMessage_({
       data: { type: "setHasSearchifyText" },
+    });
+
+    expect(progress.started).toBe(false);
+    expect(progress.done).toBe(true);
+  });
+
+  it("does not alter progress for unrelated message types", () => {
+    const controller = createController();
+    setupProgressInterceptor(controller, progress);
+
+    controller.handlePluginMessage_({
+      data: { type: "unrelatedMessage" },
     });
 
     expect(progress.started).toBe(false);

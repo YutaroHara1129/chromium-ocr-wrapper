@@ -132,7 +132,7 @@ function createSimulatedViewerFrame(
         };
       }
 
-      if (fnString.includes("__searchifyProgress") && fnString.includes("started")) {
+      if (fnString.includes("__searchifyProgress") && fnString.includes("done")) {
         if (options?.pollingStateFn) {
           return options.pollingStateFn(++pollingCallCount);
         }
@@ -945,7 +945,7 @@ describe("ChromeSearchifyPrinter", () => {
       expect(saveMock).toHaveBeenCalledWith("SEARCHIFIED");
     });
 
-    it("returns true when hasSearchifyText is true even without done signal", async () => {
+    it("returns true when progress.done is true (setHasSearchifyText received)", async () => {
       vi.useFakeTimers();
 
       const saveMock = vi.fn().mockResolvedValue({
@@ -957,7 +957,7 @@ describe("ChromeSearchifyPrinter", () => {
         pageCount: 3,
         hasSearchifyText: true,
         saveMock,
-        pollingStateFn: () => ({ started: false, done: false, hasSearchifyText: true }),
+        pollingStateFn: () => ({ started: false, done: true, hasSearchifyText: true }),
       });
 
       const { page } = createPage(frame);
@@ -975,7 +975,7 @@ describe("ChromeSearchifyPrinter", () => {
       expect(saveMock).toHaveBeenCalledWith("SEARCHIFIED");
     });
 
-    it("throws OCR error when OCR never starts for text-only PDF", async () => {
+    it("throws OCR timeout when setHasSearchifyText never arrives", async () => {
       vi.useFakeTimers();
 
       const saveMock = vi.fn().mockResolvedValue({
@@ -991,7 +991,7 @@ describe("ChromeSearchifyPrinter", () => {
       });
 
       const { page } = createPage(frame);
-      const { browser, chromeProcess } = mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame: frame, page });
+      const { chromeProcess } = mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame: frame, page });
 
       const promise = printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
         chromePath: "/custom/chrome",
@@ -999,9 +999,9 @@ describe("ChromeSearchifyPrinter", () => {
       });
       promise.catch(() => {});
 
-      await advanceUntilSettled(promise, 30_000);
+      await advanceUntilSettled(promise, 45_000);
 
-      await expect(promise).rejects.toThrow("OCR did not produce searchable output");
+      await expect(promise).rejects.toThrow(/OCR timed out after \d+ms \(timeout: 39000ms\)/);
       expect(copyFile).not.toHaveBeenCalled();
       expect(saveMock).not.toHaveBeenCalled();
       expect(rename).not.toHaveBeenCalled();
@@ -1133,7 +1133,7 @@ describe("ChromeSearchifyPrinter", () => {
   });
 
   describe("OCR progress callback", () => {
-    it("emits document-started then document-completed during successful OCR", async () => {
+    it("emits document-completed during successful OCR", async () => {
       vi.useFakeTimers();
 
       const onOcrProgress = vi.fn();
@@ -1143,9 +1143,8 @@ describe("ChromeSearchifyPrinter", () => {
         hasSearchifyText: true,
         pollingStateFn: () => {
           pollCount++;
-          if (pollCount <= 1) return { started: false, done: false, hasSearchifyText: false };
-          if (pollCount <= 3) return { started: true, done: false, hasSearchifyText: false };
-          return { started: true, done: true, hasSearchifyText: true };
+          if (pollCount <= 3) return { started: false, done: false, hasSearchifyText: false };
+          return { started: false, done: true, hasSearchifyText: true };
         },
       });
 
@@ -1162,12 +1161,9 @@ describe("ChromeSearchifyPrinter", () => {
       await expect(promise).resolves.toBeUndefined();
 
       const events = onOcrProgress.mock.calls.map(call => call[0]);
-      const startedIdx = events.findIndex((e: { type: string }) => e.type === "document-started");
       const completedIdx = events.findIndex((e: { type: string }) => e.type === "document-completed");
 
-      expect(startedIdx).toBeGreaterThanOrEqual(0);
-      expect(completedIdx).toBeGreaterThan(startedIdx);
-      expect(events[startedIdx]).toEqual({ type: "document-started", pageCount: 3 });
+      expect(completedIdx).toBeGreaterThanOrEqual(0);
       expect(events[completedIdx]).toEqual(
         expect.objectContaining({ type: "document-completed", pageCount: 3, elapsedMs: expect.any(Number) }),
       );
@@ -1213,7 +1209,7 @@ describe("ChromeSearchifyPrinter", () => {
       expect(onOcrProgress).not.toHaveBeenCalled();
     });
 
-    it("does not emit events when OCR never starts for text-only detection", async () => {
+    it("emits timeout event when setHasSearchifyText never arrives", async () => {
       vi.useFakeTimers();
 
       const onOcrProgress = vi.fn();
@@ -1232,17 +1228,19 @@ describe("ChromeSearchifyPrinter", () => {
       });
       promise.catch(() => {});
 
-      await advanceUntilSettled(promise, 30_000);
+      await advanceUntilSettled(promise, 45_000);
 
       await expect(promise).rejects.toThrow();
-      expect(onOcrProgress).not.toHaveBeenCalled();
+      expect(onOcrProgress).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "timeout" }),
+      );
     });
 
     it("propagates error when progress callback throws", async () => {
       vi.useFakeTimers();
 
       const onOcrProgress = vi.fn().mockImplementation((event) => {
-        if (event.type === "document-started") {
+        if (event.type === "document-completed") {
           throw new Error("callback exploded");
         }
       });
@@ -1253,8 +1251,8 @@ describe("ChromeSearchifyPrinter", () => {
         hasSearchifyText: false,
         pollingStateFn: () => {
           pollCount++;
-          if (pollCount <= 1) return { started: false, done: false, hasSearchifyText: false };
-          return { started: true, done: false, hasSearchifyText: false };
+          if (pollCount <= 2) return { started: false, done: false, hasSearchifyText: false };
+          return { started: false, done: true, hasSearchifyText: false };
         },
       });
 
@@ -1273,14 +1271,14 @@ describe("ChromeSearchifyPrinter", () => {
   });
 
   describe("configurable OCR timeout", () => {
-    it("throws with timeout details and emits timeout event after document-started when OCR exceeds ocrTimeoutMs", async () => {
+    it("throws with timeout details and emits timeout event when OCR exceeds ocrTimeoutMs", async () => {
       vi.useFakeTimers();
 
       const onOcrProgress = vi.fn();
       const frame = createSimulatedViewerFrame({
         pageCount: 3,
         hasSearchifyText: false,
-        pollingStateFn: () => ({ started: true, done: false, hasSearchifyText: false }),
+        pollingStateFn: () => ({ started: false, done: false, hasSearchifyText: false }),
       });
 
       mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame: frame });
@@ -1297,10 +1295,8 @@ describe("ChromeSearchifyPrinter", () => {
       await expect(promise).rejects.toThrow(/OCR timed out after \d+ms \(timeout: 5000ms\)/);
 
       const events = onOcrProgress.mock.calls.map(call => call[0]);
-      const startedIdx = events.findIndex((e: { type: string }) => e.type === "document-started");
       const timeoutIdx = events.findIndex((e: { type: string }) => e.type === "timeout");
-      expect(startedIdx).toBeGreaterThanOrEqual(0);
-      expect(timeoutIdx).toBeGreaterThan(startedIdx);
+      expect(timeoutIdx).toBeGreaterThanOrEqual(0);
       expect(events[timeoutIdx]).toEqual(
         expect.objectContaining({ type: "timeout", timeoutMs: 5000, elapsedMs: expect.any(Number) }),
       );
@@ -1312,7 +1308,7 @@ describe("ChromeSearchifyPrinter", () => {
       const frame = createSimulatedViewerFrame({
         pageCount: 3,
         hasSearchifyText: false,
-        pollingStateFn: () => ({ started: true, done: false, hasSearchifyText: false }),
+        pollingStateFn: () => ({ started: false, done: false, hasSearchifyText: false }),
       });
 
       mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame: frame });
@@ -1336,7 +1332,7 @@ describe("ChromeSearchifyPrinter", () => {
       const frame = createSimulatedViewerFrame({
         pageCount: 3,
         hasSearchifyText: false,
-        pollingStateFn: () => ({ started: true, done: false, hasSearchifyText: false }),
+        pollingStateFn: () => ({ started: false, done: false, hasSearchifyText: false }),
       });
 
       mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame: frame });

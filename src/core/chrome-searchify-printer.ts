@@ -337,6 +337,7 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
       if (!ctrl)
         return { pageCount: 0, initialHasSearchifyText: false, doneAfterScroll: false };
 
+      /** @deprecated hasSearchifyText_ is superseded by setHasSearchifyText-based progress.done */
       const initialHasSearchifyText =
         (viewer["hasSearchifyText_"] as boolean) ?? false;
 
@@ -346,10 +347,16 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
       const origHandle = (ctrl["handlePluginMessage_"] as Function).bind(ctrl);
       ctrl["handlePluginMessage_"] = function (msg: unknown) {
         const msgData = (msg as { data?: Record<string, unknown> })?.data;
-        if (msgData?.["type"] === "showSearchifyInProgress") {
-          if (msgData["show"] === true) {
-            progress.started = true;
-          } else if (msgData["show"] === false) {
+        if (msgData) {
+          const t = msgData["type"];
+          if (t === "showSearchifyInProgress") {
+            if (msgData["show"] === true) {
+              progress.started = true;
+            } else if (msgData["show"] === false) {
+              progress.done = true;
+            }
+          }
+          if (t === "setHasSearchifyText") {
             progress.done = true;
           }
         }
@@ -403,16 +410,13 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
     }
 
     const ocrTimeoutMs = options?.ocrTimeoutMs ?? DEFAULT_OCR_BASE_TIMEOUT_MS + pageCount * DEFAULT_OCR_PER_PAGE_TIMEOUT_MS;
-    const notStartedThresholdMs = Math.max(15_000, Math.min(60_000, ocrTimeoutMs / 2));
     const pollIntervalMs = 500;
-    let ocrStarted = false;
-    let documentStartedEmitted = false;
     let pollCount = 0;
 
     while (Date.now() - startTime < ocrTimeoutMs) {
       const state = await viewerFrame.evaluate((): {
-        started: boolean;
         done: boolean;
+        /** @deprecated Fallback signal; prefer setHasSearchifyText-based progress.done */
         hasSearchifyText: boolean;
       } => {
         /* v8 ignore start -- browser-side callback; not executed in Node.js unit tests */
@@ -420,7 +424,6 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
         const p = g["__searchifyProgress"] as Record<string, boolean> | undefined;
         const v = g["viewer"] as Record<string, unknown> | undefined;
         return {
-          started: p?.["started"] ?? false,
           done: p?.["done"] ?? false,
           hasSearchifyText: (v?.["hasSearchifyText_"] as boolean) ?? false,
         };
@@ -437,28 +440,10 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
         return true;
       }
 
-      if (state.started) {
-        ocrStarted = true;
-      }
-
-      if (!documentStartedEmitted && state.started) {
-        documentStartedEmitted = true;
-        onOcrProgress?.({ type: "document-started", pageCount });
-      }
-
-      if (!ocrStarted && !state.hasSearchifyText && Date.now() - startTime > notStartedThresholdMs) {
-        if (verbose) {
-          console.error(
-            `[ChromeSearchifyPrinter] OCR not started after ${notStartedThresholdMs}ms, assuming text-only PDF`,
-          );
-        }
-        return false;
-      }
-
       pollCount++;
       if (verbose && pollCount % 10 === 0) {
         console.error(
-          `[ChromeSearchifyPrinter] Waiting for OCR... ${Date.now() - startTime}ms elapsed (started=${state.started}, done=${state.done}, hasText=${state.hasSearchifyText})`,
+          `[ChromeSearchifyPrinter] Waiting for OCR... ${Date.now() - startTime}ms elapsed (done=${state.done}, hasSearchifyText=${state.hasSearchifyText})`,
         );
       }
 
