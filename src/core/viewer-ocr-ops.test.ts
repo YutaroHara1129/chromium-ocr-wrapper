@@ -11,7 +11,6 @@ import {
 
 function createViewer(overrides?: Partial<ViewerLike>): ViewerLike {
   return {
-    hasSearchifyText_: false,
     docLength_: 3,
     viewport_: {
       goToPage: vi.fn(),
@@ -106,31 +105,7 @@ describe("setupProgressInterceptor", () => {
   let progress: ProgressState;
 
   beforeEach(() => {
-    progress = { started: false, done: false };
-  });
-
-  it("sets started=true on showSearchifyInProgress with show:true", () => {
-    const controller = createController();
-    setupProgressInterceptor(controller, progress);
-
-    controller.handlePluginMessage_({
-      data: { type: "showSearchifyInProgress", show: true },
-    });
-
-    expect(progress.started).toBe(true);
-    expect(progress.done).toBe(false);
-  });
-
-  it("sets done=true on showSearchifyInProgress with show:false", () => {
-    const controller = createController();
-    setupProgressInterceptor(controller, progress);
-
-    controller.handlePluginMessage_({
-      data: { type: "showSearchifyInProgress", show: false },
-    });
-
-    expect(progress.started).toBe(false);
-    expect(progress.done).toBe(true);
+    progress = { done: false };
   });
 
   it("sets done=true on setHasSearchifyText", () => {
@@ -141,7 +116,6 @@ describe("setupProgressInterceptor", () => {
       data: { type: "setHasSearchifyText" },
     });
 
-    expect(progress.started).toBe(false);
     expect(progress.done).toBe(true);
   });
 
@@ -153,7 +127,17 @@ describe("setupProgressInterceptor", () => {
       data: { type: "unrelatedMessage" },
     });
 
-    expect(progress.started).toBe(false);
+    expect(progress.done).toBe(false);
+  });
+
+  it("does not alter progress for showSearchifyInProgress (dead in headless)", () => {
+    const controller = createController();
+    setupProgressInterceptor(controller, progress);
+
+    controller.handlePluginMessage_({
+      data: { type: "showSearchifyInProgress", show: true },
+    });
+
     expect(progress.done).toBe(false);
   });
 
@@ -173,11 +157,11 @@ describe("setupProgressInterceptor", () => {
     const controller = createController({ handlePluginMessage_: original });
     setupProgressInterceptor(controller, progress);
 
-    const msg = { data: { type: "showSearchifyInProgress", show: true } };
+    const msg = { data: { type: "setHasSearchifyText" } };
     controller.handlePluginMessage_(msg);
 
     expect(original).toHaveBeenCalledWith(msg);
-    expect(progress.started).toBe(true);
+    expect(progress.done).toBe(true);
   });
 
   it("preserves this context when calling original handler", () => {
@@ -199,7 +183,6 @@ describe("setupProgressInterceptor", () => {
       controller.handlePluginMessage_({});
     }).not.toThrow();
 
-    expect(progress.started).toBe(false);
     expect(progress.done).toBe(false);
   });
 });
@@ -252,47 +235,15 @@ describe("scrollAllPages", () => {
 });
 
 describe("pollProgressState", () => {
-  it("returns current progress and hasSearchifyText from viewer", () => {
-    const progress: ProgressState = { started: true, done: false };
-    const viewer = createViewer({ hasSearchifyText_: true });
-
-    const state = pollProgressState(viewer, progress);
-
-    expect(state).toEqual({
-      started: true,
-      done: false,
-      hasSearchifyText: true,
-    });
+  it("returns done from progress", () => {
+    const progress: ProgressState = { done: true };
+    const state = pollProgressState(progress);
+    expect(state).toEqual({ done: true });
   });
 
-  it("returns false defaults when viewer is missing properties", () => {
-    const progress: ProgressState = { started: false, done: false };
-    const viewer = createViewer({ hasSearchifyText_: undefined });
-
-    const state = pollProgressState(viewer, progress);
-
-    expect(state.hasSearchifyText).toBe(false);
-  });
-
-  it("returns false defaults when progress is all false", () => {
-    const progress: ProgressState = { started: false, done: false };
-    const viewer = createViewer({ hasSearchifyText_: false });
-
-    const state = pollProgressState(viewer, progress);
-
-    expect(state).toEqual({
-      started: false,
-      done: false,
-      hasSearchifyText: false,
-    });
-  });
-
-  it("reflects done=true from progress", () => {
-    const progress: ProgressState = { started: true, done: true };
-    const viewer = createViewer({ hasSearchifyText_: true });
-
-    const state = pollProgressState(viewer, progress);
-
-    expect(state.done).toBe(true);
+  it("returns done=false by default", () => {
+    const progress: ProgressState = { done: false };
+    const state = pollProgressState(progress);
+    expect(state).toEqual({ done: false });
   });
 });

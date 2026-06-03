@@ -1,7 +1,6 @@
 export type PdfKind = "text_only" | "blank" | "image_only" | "mixed" | "unknown";
 
 export type OcrProgressEvent =
-  | { type: "document-started"; pageCount: number }
   | { type: "document-completed"; pageCount: number; elapsedMs: number }
   | { type: "timeout"; timeoutMs: number; elapsedMs: number };
 

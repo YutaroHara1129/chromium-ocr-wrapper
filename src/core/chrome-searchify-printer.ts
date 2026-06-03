@@ -325,40 +325,25 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
       /* v8 ignore start -- browser-side callback; not executed in Node.js unit tests */
       async (): Promise<{
         pageCount: number;
-        initialHasSearchifyText: boolean;
         doneAfterScroll: boolean;
       }> => {
       const g = globalThis as Record<string, unknown>;
       const viewer = g["viewer"] as Record<string, unknown> | undefined;
       if (!viewer)
-        return { pageCount: 0, initialHasSearchifyText: false, doneAfterScroll: false };
+        return { pageCount: 0, doneAfterScroll: false };
 
       const ctrl = viewer["currentController"] as Record<string, unknown> | undefined;
       if (!ctrl)
-        return { pageCount: 0, initialHasSearchifyText: false, doneAfterScroll: false };
+        return { pageCount: 0, doneAfterScroll: false };
 
-      /** @deprecated hasSearchifyText_ is superseded by setHasSearchifyText-based progress.done */
-      const initialHasSearchifyText =
-        (viewer["hasSearchifyText_"] as boolean) ?? false;
-
-      const progress: Record<string, boolean> = { started: false, done: false };
+      const progress: Record<string, boolean> = { done: false };
       g["__searchifyProgress"] = progress;
 
       const origHandle = (ctrl["handlePluginMessage_"] as Function).bind(ctrl);
       ctrl["handlePluginMessage_"] = function (msg: unknown) {
         const msgData = (msg as { data?: Record<string, unknown> })?.data;
-        if (msgData) {
-          const t = msgData["type"];
-          if (t === "showSearchifyInProgress") {
-            if (msgData["show"] === true) {
-              progress.started = true;
-            } else if (msgData["show"] === false) {
-              progress.done = true;
-            }
-          }
-          if (t === "setHasSearchifyText") {
-            progress.done = true;
-          }
+        if (msgData?.["type"] === "setHasSearchifyText") {
+          progress.done = true;
         }
         return (origHandle as Function)(msg);
       };
@@ -387,16 +372,16 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
         }
       }
 
-      return { pageCount, initialHasSearchifyText, doneAfterScroll: progress["done"] ?? false };
+      return { pageCount, doneAfterScroll: progress["done"] ?? false };
     });
     /* v8 ignore end */
 
-    const { pageCount, initialHasSearchifyText, doneAfterScroll } = setupResult;
+    const { pageCount, doneAfterScroll } = setupResult;
     const startTime = Date.now();
 
     if (verbose) {
       console.error(
-        `[ChromeSearchifyPrinter] Pages: ${pageCount}, initialHasSearchifyText: ${initialHasSearchifyText}, doneAfterScroll: ${doneAfterScroll}`,
+        `[ChromeSearchifyPrinter] Pages: ${pageCount}, doneAfterScroll: ${doneAfterScroll}`,
       );
     }
 
@@ -414,26 +399,18 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
     let pollCount = 0;
 
     while (Date.now() - startTime < ocrTimeoutMs) {
-      const state = await viewerFrame.evaluate((): {
-        done: boolean;
-        /** @deprecated Fallback signal; prefer setHasSearchifyText-based progress.done */
-        hasSearchifyText: boolean;
-      } => {
+      const state = await viewerFrame.evaluate((): { done: boolean } => {
         /* v8 ignore start -- browser-side callback; not executed in Node.js unit tests */
         const g = globalThis as Record<string, unknown>;
         const p = g["__searchifyProgress"] as Record<string, boolean> | undefined;
-        const v = g["viewer"] as Record<string, unknown> | undefined;
-        return {
-          done: p?.["done"] ?? false,
-          hasSearchifyText: (v?.["hasSearchifyText_"] as boolean) ?? false,
-        };
+        return { done: p?.["done"] ?? false };
         /* v8 ignore end */
       });
 
-      if (state.done || state.hasSearchifyText) {
+      if (state.done) {
         if (verbose) {
           console.error(
-            `[ChromeSearchifyPrinter] OCR complete after ${Date.now() - startTime}ms (done=${state.done}, hasSearchifyText=${state.hasSearchifyText})`,
+            `[ChromeSearchifyPrinter] OCR complete after ${Date.now() - startTime}ms`,
           );
         }
         onOcrProgress?.({ type: "document-completed", pageCount, elapsedMs: Date.now() - startTime });
@@ -443,7 +420,7 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
       pollCount++;
       if (verbose && pollCount % 10 === 0) {
         console.error(
-          `[ChromeSearchifyPrinter] Waiting for OCR... ${Date.now() - startTime}ms elapsed (done=${state.done}, hasSearchifyText=${state.hasSearchifyText})`,
+          `[ChromeSearchifyPrinter] Waiting for OCR... ${Date.now() - startTime}ms elapsed (done=${state.done})`,
         );
       }
 

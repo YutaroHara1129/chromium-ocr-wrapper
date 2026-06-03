@@ -62,22 +62,16 @@ function createChromeProcess(): { on: ReturnType<typeof vi.fn>; stderr: { on: Re
 
 type ViewerSimulationOptions = {
   pageCount?: number;
-  hasSearchifyText?: boolean;
   progressDoneAfterSetup?: boolean;
   saveMock?: ReturnType<typeof vi.fn>;
   uploadMock?: ReturnType<typeof vi.fn>;
-  pollingStateFn?: (callCount: number) => {
-    started: boolean;
-    done: boolean;
-    hasSearchifyText: boolean;
-  };
+  pollingStateFn?: (callCount: number) => { done: boolean };
 };
 
 function createSimulatedViewerFrame(
   options?: ViewerSimulationOptions,
 ): MockViewerFrame {
   const pageCount = options?.pageCount ?? 3;
-  const hasSearchifyText = options?.hasSearchifyText ?? true;
   const progressDoneAfterSetup = options?.progressDoneAfterSetup ?? false;
 
   const saveMock =
@@ -127,7 +121,6 @@ function createSimulatedViewerFrame(
         searchifySetupCall++;
         return {
           pageCount,
-          initialHasSearchifyText: hasSearchifyText,
           doneAfterScroll: progressDoneAfterSetup || searchifySetupCall > 1,
         };
       }
@@ -136,11 +129,7 @@ function createSimulatedViewerFrame(
         if (options?.pollingStateFn) {
           return options.pollingStateFn(++pollingCallCount);
         }
-        return {
-          started: true,
-          done: true,
-          hasSearchifyText,
-        };
+        return { done: true };
       }
 
       return undefined;
@@ -489,7 +478,7 @@ describe("ChromeSearchifyPrinter", () => {
     const pageBundle = createPage();
     pageBundle.page.frames.mockReturnValue([{}]);
 
-    const { chromeProcess, browser } = mockSearchifyRuntime({
+    const { chromeProcess } = mockSearchifyRuntime({
       chromePath: "/custom/chrome",
       page: pageBundle.page,
     });
@@ -513,7 +502,7 @@ describe("ChromeSearchifyPrinter", () => {
     const frame = createSimulatedViewerFrame({
       saveMock: vi.fn().mockResolvedValue(null),
     });
-    const { browser, chromeProcess } = mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame: frame });
+    const { chromeProcess } = mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame: frame });
 
     await expect(
       printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
@@ -547,7 +536,7 @@ describe("ChromeSearchifyPrinter", () => {
   });
 
   it("close() is idempotent and safe to call twice", async () => {
-    const { chromeProcess, browser } = mockSearchifyRuntime({
+    const { chromeProcess } = mockSearchifyRuntime({
       chromePath: "/custom/chrome",
     });
 
@@ -609,7 +598,7 @@ describe("ChromeSearchifyPrinter", () => {
     pageBundle.page.goto.mockRejectedValue(new Error("goto failed"));
 
     const chromeProcess = createChromeProcess();
-    const { browser } = mockSearchifyRuntime({
+    mockSearchifyRuntime({
       chromePath: "/custom/chrome",
       page: pageBundle.page,
       chromeProcess,
@@ -661,7 +650,7 @@ describe("ChromeSearchifyPrinter", () => {
       saveMock,
     });
 
-    const { browser, chromeProcess } = mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame });
+    const { chromeProcess } = mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame });
 
     await expect(
       printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
@@ -699,7 +688,7 @@ describe("ChromeSearchifyPrinter", () => {
 
     const viewerFrame = createSimulatedViewerFrame({ saveMock, uploadMock });
 
-    const { browser, chromeProcess } = mockSearchifyRuntime({
+    const { chromeProcess } = mockSearchifyRuntime({
       chromePath: "/custom/chrome",
       viewerFrame,
     });
@@ -720,7 +709,7 @@ describe("ChromeSearchifyPrinter", () => {
 
     const viewerFrame = createSimulatedViewerFrame({ saveMock });
 
-    const { browser, chromeProcess } = mockSearchifyRuntime({
+    const { chromeProcess } = mockSearchifyRuntime({
       chromePath: "/custom/chrome",
       viewerFrame,
     });
@@ -783,7 +772,7 @@ describe("ChromeSearchifyPrinter", () => {
     const uploadMock = vi.fn().mockResolvedValue({ ok: true } as Response);
 
     const viewerFrame = createSimulatedViewerFrame({ saveMock, uploadMock });
-    const { browser, chromeProcess } = mockSearchifyRuntime({
+    const { chromeProcess } = mockSearchifyRuntime({
       chromePath: "/custom/chrome",
       viewerFrame,
     });
@@ -909,7 +898,7 @@ describe("ChromeSearchifyPrinter", () => {
   });
 
   describe("waitForSearchifyComplete timeout paths", () => {
-    it("returns true when OCR starts after 15s for large PDF", async () => {
+    it("returns true when OCR completes after polling", async () => {
       vi.useFakeTimers();
 
       const saveMock = vi.fn().mockResolvedValue({
@@ -920,14 +909,13 @@ describe("ChromeSearchifyPrinter", () => {
       let pollCount = 0;
       const frame = createSimulatedViewerFrame({
         pageCount: 100,
-        hasSearchifyText: false,
         saveMock,
         pollingStateFn: () => {
           pollCount++;
           if (pollCount <= 40) {
-            return { started: false, done: false, hasSearchifyText: false };
+            return { done: false };
           }
-          return { started: true, done: true, hasSearchifyText: true };
+          return { done: true };
         },
       });
 
@@ -955,13 +943,12 @@ describe("ChromeSearchifyPrinter", () => {
 
       const frame = createSimulatedViewerFrame({
         pageCount: 3,
-        hasSearchifyText: true,
         saveMock,
-        pollingStateFn: () => ({ started: false, done: true, hasSearchifyText: true }),
+        pollingStateFn: () => ({ done: true }),
       });
 
       const { page } = createPage(frame);
-      const { browser, chromeProcess } = mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame: frame, page });
+      mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame: frame, page });
 
       const promise = printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
         chromePath: "/custom/chrome",
@@ -985,9 +972,8 @@ describe("ChromeSearchifyPrinter", () => {
 
       const frame = createSimulatedViewerFrame({
         pageCount: 3,
-        hasSearchifyText: false,
         saveMock,
-        pollingStateFn: () => ({ started: false, done: false, hasSearchifyText: false }),
+        pollingStateFn: () => ({ done: false }),
       });
 
       const { page } = createPage(frame);
@@ -1008,7 +994,7 @@ describe("ChromeSearchifyPrinter", () => {
       expect(chromeProcess.kill).toHaveBeenCalled();
     });
 
-    it("throws OCR error when OCR starts but never completes within maxWaitMs", async () => {
+    it("throws OCR timeout when OCR never completes within timeout", async () => {
       vi.useFakeTimers();
 
       const saveMock = vi.fn().mockResolvedValue({
@@ -1018,13 +1004,12 @@ describe("ChromeSearchifyPrinter", () => {
 
       const frame = createSimulatedViewerFrame({
         pageCount: 3,
-        hasSearchifyText: false,
         saveMock,
-        pollingStateFn: () => ({ started: true, done: false, hasSearchifyText: false }),
+        pollingStateFn: () => ({ done: false }),
       });
 
       const { page } = createPage(frame);
-      const { browser, chromeProcess } = mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame: frame, page });
+      const { chromeProcess } = mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame: frame, page });
 
       const promise = printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
         chromePath: "/custom/chrome",
@@ -1047,8 +1032,7 @@ describe("ChromeSearchifyPrinter", () => {
 
       const frame = createSimulatedViewerFrame({
         pageCount: 3,
-        hasSearchifyText: false,
-        pollingStateFn: () => ({ started: true, done: false, hasSearchifyText: false }),
+        pollingStateFn: () => ({ done: false }),
       });
 
       const { page } = createPage(frame);
@@ -1076,7 +1060,6 @@ describe("ChromeSearchifyPrinter", () => {
 
       const frame = createSimulatedViewerFrame({
         pageCount: 3,
-        hasSearchifyText: true,
         progressDoneAfterSetup: true,
       });
 
@@ -1140,11 +1123,10 @@ describe("ChromeSearchifyPrinter", () => {
       let pollCount = 0;
       const frame = createSimulatedViewerFrame({
         pageCount: 3,
-        hasSearchifyText: true,
         pollingStateFn: () => {
           pollCount++;
-          if (pollCount <= 3) return { started: false, done: false, hasSearchifyText: false };
-          return { started: false, done: true, hasSearchifyText: true };
+          if (pollCount <= 3) return { done: false };
+          return { done: true };
         },
       });
 
@@ -1173,7 +1155,6 @@ describe("ChromeSearchifyPrinter", () => {
       const onOcrProgress = vi.fn();
       const frame = createSimulatedViewerFrame({
         pageCount: 3,
-        hasSearchifyText: true,
         progressDoneAfterSetup: true,
       });
 
@@ -1194,7 +1175,6 @@ describe("ChromeSearchifyPrinter", () => {
       const onOcrProgress = vi.fn();
       const frame = createSimulatedViewerFrame({
         pageCount: 0,
-        hasSearchifyText: false,
       });
 
       mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame: frame });
@@ -1215,8 +1195,7 @@ describe("ChromeSearchifyPrinter", () => {
       const onOcrProgress = vi.fn();
       const frame = createSimulatedViewerFrame({
         pageCount: 3,
-        hasSearchifyText: false,
-        pollingStateFn: () => ({ started: false, done: false, hasSearchifyText: false }),
+        pollingStateFn: () => ({ done: false }),
       });
 
       const { page } = createPage(frame);
@@ -1248,11 +1227,10 @@ describe("ChromeSearchifyPrinter", () => {
       let pollCount = 0;
       const frame = createSimulatedViewerFrame({
         pageCount: 3,
-        hasSearchifyText: false,
         pollingStateFn: () => {
           pollCount++;
-          if (pollCount <= 2) return { started: false, done: false, hasSearchifyText: false };
-          return { started: false, done: true, hasSearchifyText: false };
+          if (pollCount <= 2) return { done: false };
+          return { done: true };
         },
       });
 
@@ -1277,8 +1255,7 @@ describe("ChromeSearchifyPrinter", () => {
       const onOcrProgress = vi.fn();
       const frame = createSimulatedViewerFrame({
         pageCount: 3,
-        hasSearchifyText: false,
-        pollingStateFn: () => ({ started: false, done: false, hasSearchifyText: false }),
+        pollingStateFn: () => ({ done: false }),
       });
 
       mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame: frame });
@@ -1307,8 +1284,7 @@ describe("ChromeSearchifyPrinter", () => {
 
       const frame = createSimulatedViewerFrame({
         pageCount: 3,
-        hasSearchifyText: false,
-        pollingStateFn: () => ({ started: false, done: false, hasSearchifyText: false }),
+        pollingStateFn: () => ({ done: false }),
       });
 
       mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame: frame });
@@ -1331,8 +1307,7 @@ describe("ChromeSearchifyPrinter", () => {
       const onOcrProgress = vi.fn();
       const frame = createSimulatedViewerFrame({
         pageCount: 3,
-        hasSearchifyText: false,
-        pollingStateFn: () => ({ started: false, done: false, hasSearchifyText: false }),
+        pollingStateFn: () => ({ done: false }),
       });
 
       mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame: frame });
