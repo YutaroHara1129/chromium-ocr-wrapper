@@ -62,7 +62,6 @@ describe("saveAndUpload", () => {
   it("returns NO_VIEWER when viewer is absent", async () => {
     delete (globalThis as Record<string, unknown>)["viewer"];
     const result = await saveAndUpload({
-      searchifyOk: true,
       uploadUrl: "http://localhost/upload",
       saveTimeoutMs: 5_000,
     });
@@ -72,7 +71,6 @@ describe("saveAndUpload", () => {
   it("returns NO_VIEWER when viewer is not an object", async () => {
     (globalThis as Record<string, unknown>)["viewer"] = "not an object";
     const result = await saveAndUpload({
-      searchifyOk: true,
       uploadUrl: "http://localhost/upload",
       saveTimeoutMs: 5_000,
     });
@@ -82,20 +80,18 @@ describe("saveAndUpload", () => {
   it("returns NO_CONTROLLER when currentController is absent", async () => {
     (globalThis as Record<string, unknown>)["viewer"] = {};
     const result = await saveAndUpload({
-      searchifyOk: true,
       uploadUrl: "http://localhost/upload",
       saveTimeoutMs: 5_000,
     });
     expect(result).toEqual({ uploaded: false, reason: "NO_CONTROLLER" });
   });
 
-  it("uploads SEARCHIFIED data when searchifyOk is true and save succeeds", async () => {
+  it("uploads SEARCHIFIED data when save succeeds", async () => {
     const env = setupGlobalViewer();
     cleanup = env.cleanup;
     vi.spyOn(globalThis, "fetch").mockResolvedValue({ ok: true } as Response);
 
     const result = await saveAndUpload({
-      searchifyOk: true,
       uploadUrl: "http://localhost/upload",
       saveTimeoutMs: 5_000,
     });
@@ -110,20 +106,6 @@ describe("saveAndUpload", () => {
     });
   });
 
-  it("returns OCR_INCOMPLETE when searchifyOk is false without attempting save", async () => {
-    const env = setupGlobalViewer();
-    cleanup = env.cleanup;
-
-    const result = await saveAndUpload({
-      searchifyOk: false,
-      uploadUrl: "http://localhost/upload",
-      saveTimeoutMs: 5_000,
-    });
-
-    expect(env.saveMock).not.toHaveBeenCalled();
-    expect(result).toEqual({ uploaded: false, reason: "OCR_INCOMPLETE" });
-  });
-
   it("returns NO_DATA when SEARCHIFIED save returns null without attempting ORIGINAL", async () => {
     const env = setupGlobalViewer({
       searchifiedSaveResult: null,
@@ -131,7 +113,6 @@ describe("saveAndUpload", () => {
     cleanup = env.cleanup;
 
     const result = await saveAndUpload({
-      searchifyOk: true,
       uploadUrl: "http://localhost/upload",
       saveTimeoutMs: 5_000,
     });
@@ -150,7 +131,6 @@ describe("saveAndUpload", () => {
     } as Response);
 
     const result = await saveAndUpload({
-      searchifyOk: true,
       uploadUrl: "http://localhost/upload",
       saveTimeoutMs: 5_000,
     });
@@ -171,7 +151,6 @@ describe("saveAndUpload", () => {
 
     await expect(
       saveAndUpload({
-        searchifyOk: true,
         uploadUrl: "http://localhost/upload",
         saveTimeoutMs: 5_000,
       }),
@@ -184,7 +163,6 @@ describe("saveAndUpload", () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue({ ok: true } as Response);
 
     await saveAndUpload({
-      searchifyOk: true,
       uploadUrl: "http://localhost:9999/upload?token=abc",
       saveTimeoutMs: 5_000,
     });
@@ -202,6 +180,50 @@ describe("saveAndUpload", () => {
     expect(body).toBeInstanceOf(Blob);
   });
 
+  it("throws with descriptive message when save() rejects with Error", async () => {
+    const originalViewer = (globalThis as Record<string, unknown>)["viewer"];
+    const originalFetch = globalThis.fetch;
+
+    const saveMock = vi.fn().mockRejectedValue(new Error("save crashed"));
+    (globalThis as Record<string, unknown>)["viewer"] = {
+      currentController: { save: saveMock },
+    };
+
+    try {
+      await expect(
+        saveAndUpload({
+          uploadUrl: "http://localhost/upload",
+          saveTimeoutMs: 5_000,
+        }),
+      ).rejects.toThrow("Browser PDF save/upload failed: save crashed");
+    } finally {
+      (globalThis as Record<string, unknown>)["viewer"] = originalViewer;
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("throws with String(error) when save() rejects with non-Error", async () => {
+    const originalViewer = (globalThis as Record<string, unknown>)["viewer"];
+    const originalFetch = globalThis.fetch;
+
+    const saveMock = vi.fn().mockRejectedValue("boom");
+    (globalThis as Record<string, unknown>)["viewer"] = {
+      currentController: { save: saveMock },
+    };
+
+    try {
+      await expect(
+        saveAndUpload({
+          uploadUrl: "http://localhost/upload",
+          saveTimeoutMs: 5_000,
+        }),
+      ).rejects.toThrow("Browser PDF save/upload failed: boom");
+    } finally {
+      (globalThis as Record<string, unknown>)["viewer"] = originalViewer;
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("returns NO_DATA when save result has no dataToSave", async () => {
     const env = setupGlobalViewer({
       saveResult: { fileName: "empty.pdf" } as never,
@@ -209,7 +231,6 @@ describe("saveAndUpload", () => {
     cleanup = env.cleanup;
 
     const result = await saveAndUpload({
-      searchifyOk: true,
       uploadUrl: "http://localhost/upload",
       saveTimeoutMs: 5_000,
     });

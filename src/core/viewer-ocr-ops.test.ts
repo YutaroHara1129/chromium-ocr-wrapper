@@ -3,7 +3,6 @@ import {
   getPageCount,
   setupProgressInterceptor,
   scrollAllPages,
-  pollProgressState,
   type ViewerLike,
   type ControllerLike,
   type ProgressState,
@@ -105,10 +104,10 @@ describe("setupProgressInterceptor", () => {
   let progress: ProgressState;
 
   beforeEach(() => {
-    progress = { done: false };
+    progress = { ocrTriggered: false };
   });
 
-  it("sets done=true on setHasSearchifyText", () => {
+  it("sets ocrTriggered=true on setHasSearchifyText", () => {
     const controller = createController();
     setupProgressInterceptor(controller, progress);
 
@@ -116,7 +115,7 @@ describe("setupProgressInterceptor", () => {
       data: { type: "setHasSearchifyText" },
     });
 
-    expect(progress.done).toBe(true);
+    expect(progress.ocrTriggered).toBe(true);
   });
 
   it("does not alter progress for unrelated message types", () => {
@@ -127,7 +126,7 @@ describe("setupProgressInterceptor", () => {
       data: { type: "unrelatedMessage" },
     });
 
-    expect(progress.done).toBe(false);
+    expect(progress.ocrTriggered).toBe(false);
   });
 
   it("does not alter progress for showSearchifyInProgress (dead in headless)", () => {
@@ -138,7 +137,7 @@ describe("setupProgressInterceptor", () => {
       data: { type: "showSearchifyInProgress", show: true },
     });
 
-    expect(progress.done).toBe(false);
+    expect(progress.ocrTriggered).toBe(false);
   });
 
   it("calls the original handlePluginMessage_ for every message", () => {
@@ -161,7 +160,7 @@ describe("setupProgressInterceptor", () => {
     controller.handlePluginMessage_(msg);
 
     expect(original).toHaveBeenCalledWith(msg);
-    expect(progress.done).toBe(true);
+    expect(progress.ocrTriggered).toBe(true);
   });
 
   it("preserves this context when calling original handler", () => {
@@ -183,7 +182,7 @@ describe("setupProgressInterceptor", () => {
       controller.handlePluginMessage_({});
     }).not.toThrow();
 
-    expect(progress.done).toBe(false);
+    expect(progress.ocrTriggered).toBe(false);
   });
 });
 
@@ -231,19 +230,5 @@ describe("scrollAllPages", () => {
     const viewer = createViewer({ viewport_: {} as never });
 
     await scrollAllPages(viewer, 5);
-  });
-});
-
-describe("pollProgressState", () => {
-  it("returns done from progress", () => {
-    const progress: ProgressState = { done: true };
-    const state = pollProgressState(progress);
-    expect(state).toEqual({ done: true });
-  });
-
-  it("returns done=false by default", () => {
-    const progress: ProgressState = { done: false };
-    const state = pollProgressState(progress);
-    expect(state).toEqual({ done: false });
   });
 });

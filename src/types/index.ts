@@ -6,6 +6,12 @@ export type OcrProgressEvent =
 
 export type OcrProgressCallback = (event: OcrProgressEvent) => void;
 
+export type OcrVerificationResult = {
+  totalPages: number;
+  ocrTargetPages: number;
+  verifiedPages: number;
+};
+
 export interface PdfMetadata {
   pageCount: number;
 }
@@ -25,6 +31,7 @@ export interface ConversionResult {
   textSize: number;
   kind: PdfKind;
   pagesMadeSearchable: number;
+  ocrVerification?: OcrVerificationResult;
 }
 
 export interface ConversionOptions {
@@ -51,7 +58,7 @@ export interface IChromeSearchifyPrinter {
     inputPath: string,
     outputPath: string,
     options?: SearchifyToFileOptions,
-  ): Promise<void>;
+  ): Promise<OcrVerificationResult>;
 
   close(): Promise<void>;
   killProcessGroup(): void;

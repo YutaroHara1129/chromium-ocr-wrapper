@@ -14,8 +14,8 @@
     }
   },
   "bin": {
-    "chromium-ocr": "dist/cli.js",
-    "chromium-ocr-wrapper": "dist/cli.js"
+    "chromium-ocr": "dist/cli-entry.js",
+    "chromium-ocr-wrapper": "dist/cli-entry.js"
   },
   "files": [
     "dist"

@@ -1,14 +1,13 @@
 import { Command } from "commander";
 import { glob } from "glob";
 import { resolve, basename, extname, join, dirname, relative } from "node:path";
-import { statSync, realpathSync } from "node:fs";
+import { statSync } from "node:fs";
 import { createRequire } from "node:module";
-import { pathToFileURL } from "node:url";
 import { ChromeSearchifyPrinter } from "./core/chrome-searchify-printer.js";
 import { PdfInfoExtractor } from "./utils/pdf-info.js";
 import { ConversionPipeline } from "./core/pipeline.js";
 import { NodeFileWriter } from "./utils/file-writer.js";
-import type { ConversionOptions } from "./types/index.js";
+import type { ConversionOptions, ConversionResult } from "./types/index.js";
 
 const require = createRequire(import.meta.url);
 const pkgVersion = require("../package.json").version;
@@ -132,7 +131,7 @@ export async function runCli(argv: string[]): Promise<void> {
             const ocrNote =
               result.kind === "text_only" || result.kind === "blank"
                 ? "OCR not needed"
-                : `${result.pagesMadeSearchable} pages made searchable`;
+                : formatOcrReport(result);
             console.log(
               `Done: ${result.inputPath} -> ${result.outputPath} (${result.pageCount} pages, ${ocrNote})`,
             );
@@ -227,22 +226,25 @@ function resolveOutputPath(
   return resolve(output);
 }
 
-const _isDirectExecution =
-  process.argv[1] !== undefined &&
-  import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+export function formatOcrReport(result: ConversionResult): string {
+  if (!result.ocrVerification) {
+    return `${result.pagesMadeSearchable} pages made searchable`;
+  }
+  const v = result.ocrVerification;
+  const status = v.ocrTargetPages === v.verifiedPages ? "OK" : "INCOMPLETE";
+  return `${v.verifiedPages}/${v.ocrTargetPages} pages verified (${status}), total ${v.totalPages} pages`;
+}
 
-if (_isDirectExecution) {
-  runCli(process.argv).catch((error: unknown) => {
-    if (error && typeof error === "object" && "exitCode" in error) {
-      const { exitCode } = error as { exitCode?: unknown };
+export function handleCliError(error: unknown): void {
+  if (error && typeof error === "object" && "exitCode" in error) {
+    const { exitCode } = error as { exitCode?: unknown };
 
-      if (typeof exitCode === "number") {
-        process.exitCode = exitCode;
-        return;
-      }
+    if (typeof exitCode === "number") {
+      process.exitCode = exitCode;
+      return;
     }
+  }
 
-    console.error(error);
-    process.exitCode = 1;
-  });
+  console.error(error);
+  process.exitCode = 1;
 }

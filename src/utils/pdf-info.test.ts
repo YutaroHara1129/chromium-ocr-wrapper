@@ -1,10 +1,11 @@
 import { mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { deflateSync } from "node:zlib";
 import { PDFDocument, PDFName, StandardFonts } from "pdf-lib";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { IPdfInfoExtractor } from "../types/index.js";
-import { PdfInfoExtractor, extractPageCount, analyzePdfContent } from "./pdf-info.js";
+import { PdfInfoExtractor, extractPageCount, analyzePdfContent, verifyPerPageText } from "./pdf-info.js";
 
 describe("PdfInfoExtractor", () => {
   let extractor: IPdfInfoExtractor;
@@ -425,6 +426,45 @@ describe("analyzePdfContent", () => {
     const basePdf = makePdfWithResources(1, { includeFont: true, includeImage: true });
     expect(analyzePdfContent(basePdf).kind).toBe("mixed");
   });
+
+  it("detects image indicator inside FlateDecode stream when raw text has no image", () => {
+    const streamContent = "/Subtype /Image /Width 1 /Height 1";
+    const compressed = deflateSync(Buffer.from(streamContent, "latin1"));
+
+    const lines: string[] = ["%PDF-1.4"];
+    let offset = lines[0]!.length + 1;
+    const objectPositions: number[] = [];
+
+    const obj = (num: number, content: string): void => {
+      objectPositions.push(offset);
+      const text = `${num} 0 obj\n${content}\nendobj\n`;
+      lines.push(text);
+      offset += text.length;
+    };
+
+    obj(2, `<< /Type /Pages /Kids [3 0 R] /Count 1 >>`);
+    obj(1, `<< /Type /Catalog /Pages 2 0 R >>`);
+    obj(3, `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]>>`);
+
+    const streamData = compressed.toString("latin1");
+    objectPositions.push(offset);
+    const streamObjText = `4 0 obj\n<< /Filter /FlateDecode /Length ${streamData.length} >>\nstream\n${streamData}\nendstream\n`;
+    lines.push(streamObjText);
+    offset += streamObjText.length;
+
+    const xrefStart = offset;
+    lines.push("xref\n");
+    lines.push("0 5\n");
+    lines.push("0000000000 65535 f \n");
+    for (const pos of objectPositions) {
+      lines.push(`${String(pos).padStart(10, "0")} 00000 n \n`);
+    }
+    lines.push("trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n" + xrefStart + "\n%%EOF\n");
+
+    const buf = Buffer.from(lines.join(""), "latin1");
+    const result = analyzePdfContent(buf);
+    expect(result.hasImages).toBe(true);
+  });
 });
 
 describe("PdfInfoExtractor.analyze", () => {
@@ -485,5 +525,222 @@ describe("PdfInfoExtractor.analyze", () => {
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
+  });
+});
+
+function makeContentPdf(pageStreams: Array<string | null>): Buffer {
+  const lines: string[] = ["%PDF-1.4"];
+  let offset = lines[0]!.length + 1;
+  const objectPositions: number[] = [];
+
+  const catalogObjNum = 1;
+  const pagesObjNum = 2;
+  const pageCount = pageStreams.length;
+
+  const pageObjNums: number[] = [];
+  const contentObjNums: Array<number | null> = [];
+  let nextObjNum = 3;
+
+  for (let i = 0; i < pageCount; i++) {
+    pageObjNums.push(nextObjNum++);
+  }
+  for (let i = 0; i < pageCount; i++) {
+    if (pageStreams[i] !== null) {
+      contentObjNums.push(nextObjNum++);
+    } else {
+      contentObjNums.push(null);
+    }
+  }
+
+  const obj = (num: number, content: string): void => {
+    objectPositions.push(offset);
+    const text = `${num} 0 obj\n${content}\nendobj\n`;
+    lines.push(text);
+    offset += text.length;
+  };
+
+  const kids = pageObjNums.map((n) => `${n} 0 R`).join(" ");
+  obj(pagesObjNum, `<< /Type /Pages /Kids [${kids}] /Count ${pageCount} >>`);
+  obj(catalogObjNum, `<< /Type /Catalog /Pages ${pagesObjNum} 0 R >>`);
+
+  for (let i = 0; i < pageCount; i++) {
+    const contentNum = contentObjNums[i];
+    const contentsRef = contentNum !== null ? ` /Contents ${contentNum} 0 R` : "";
+    obj(pageObjNums[i]!, `<< /Type /Page /Parent ${pagesObjNum} 0 R /MediaBox [0 0 612 792]${contentsRef} >>`);
+  }
+
+  for (let i = 0; i < pageCount; i++) {
+    if (pageStreams[i] === null) continue;
+    const contentNum = contentObjNums[i]!;
+    const streamContent = pageStreams[i]!;
+    obj(contentNum, `<< /Length ${streamContent.length} >>\nstream\n${streamContent}\nendstream`);
+  }
+
+  const xrefStart = offset;
+  const totalObjs = nextObjNum;
+  lines.push("xref\n");
+  lines.push(`0 ${totalObjs}\n`);
+  lines.push("0000000000 65535 f \n");
+  for (let i = 0; i < objectPositions.length; i++) {
+    const pos = String(objectPositions[i]!).padStart(10, "0");
+    lines.push(`${pos} 00000 n \n`);
+  }
+
+  lines.push(
+    `trailer\n<< /Size ${totalObjs} /Root ${catalogObjNum} 0 R >>\nstartxref\n${xrefStart}\n%%EOF\n`,
+  );
+
+  return Buffer.from(lines.join(""), "latin1");
+}
+
+describe("verifyPerPageText", () => {
+  it("detects text on all pages", () => {
+    const buf = makeContentPdf([
+      "BT /F1 12 Tf 100 700 Td (Hello) Tj ET",
+      "BT /F1 12 Tf 100 700 Td (World) Tj ET",
+    ]);
+    const result = verifyPerPageText(buf);
+    expect(result).toEqual({
+      totalPages: 2,
+      ocrTargetPages: 2,
+      verifiedPages: 2,
+    });
+  });
+
+  it("detects no text on image-only pages", () => {
+    const buf = makeContentPdf([
+      "100 100 200 200 re S",
+      "50 50 m 100 100 l S",
+    ]);
+    const result = verifyPerPageText(buf);
+    expect(result).toEqual({
+      totalPages: 2,
+      ocrTargetPages: 2,
+      verifiedPages: 0,
+    });
+  });
+
+  it("detects text on some pages but not others", () => {
+    const buf = makeContentPdf([
+      "BT /F1 12 Tf 100 700 Td (Hello) Tj ET",
+      "100 100 200 200 re S",
+      "BT /F1 12 Tf 100 700 Td (World) Tj ET",
+    ]);
+    const result = verifyPerPageText(buf);
+    expect(result).toEqual({
+      totalPages: 3,
+      ocrTargetPages: 3,
+      verifiedPages: 2,
+    });
+  });
+
+  it("returns zeros for empty buffer", () => {
+    const result = verifyPerPageText(Buffer.alloc(0));
+    expect(result).toEqual({
+      totalPages: 0,
+      ocrTargetPages: 0,
+      verifiedPages: 0,
+    });
+  });
+
+  it("returns zeros for non-PDF buffer", () => {
+    const result = verifyPerPageText(Buffer.from("not a pdf"));
+    expect(result).toEqual({
+      totalPages: 0,
+      ocrTargetPages: 0,
+      verifiedPages: 0,
+    });
+  });
+
+  it("handles pages without /Contents entry", () => {
+    const buf = makeContentPdf([null, null]);
+    const result = verifyPerPageText(buf);
+    expect(result).toEqual({
+      totalPages: 2,
+      ocrTargetPages: 2,
+      verifiedPages: 0,
+    });
+  });
+
+  it("handles single-page PDF with text", () => {
+    const buf = makeContentPdf(["BT /F1 12 Tf 100 700 Td (Hello) Tj ET"]);
+    const result = verifyPerPageText(buf);
+    expect(result).toEqual({
+      totalPages: 1,
+      ocrTargetPages: 1,
+      verifiedPages: 1,
+    });
+  });
+
+  it("handles mixed pages with and without content streams", () => {
+    const buf = makeContentPdf([
+      "BT /F1 12 Tf 100 700 Td (Hello) Tj ET",
+      null,
+      "100 100 200 200 re S",
+    ]);
+    const result = verifyPerPageText(buf);
+    expect(result).toEqual({
+      totalPages: 3,
+      ocrTargetPages: 3,
+      verifiedPages: 1,
+    });
+  });
+
+  it("handles pdf-lib generated PDF with compressed FlateDecode streams", async () => {
+    const doc = await PDFDocument.create();
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    const page = doc.addPage([595.28, 841.89]);
+    page.drawText("Hello", { x: 72, y: 700, size: 14, font });
+    const pdfBytes = await doc.save();
+
+    const result = verifyPerPageText(Buffer.from(pdfBytes));
+    expect(result).toEqual({
+      totalPages: 1,
+      ocrTargetPages: 1,
+      verifiedPages: 1,
+    });
+  });
+
+  it("handles FlateDecode stream with invalid compressed data gracefully", () => {
+    const fakeCompressed = "this is not valid zlib data!!";
+    const streamContent = "BT /F1 12 Tf (Hello) Tj ET";
+    void deflateSync(Buffer.from(streamContent, "latin1"));
+
+    const lines: string[] = ["%PDF-1.4"];
+    let offset = lines[0]!.length + 1;
+    const objectPositions: number[] = [];
+
+    const obj = (num: number, content: string): void => {
+      objectPositions.push(offset);
+      const text = `${num} 0 obj\n${content}\nendobj\n`;
+      lines.push(text);
+      offset += text.length;
+    };
+
+    obj(2, `<< /Type /Pages /Kids [3 0 R] /Count 1 >>`);
+    obj(1, `<< /Type /Catalog /Pages 2 0 R >>`);
+    obj(3, `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R>>`);
+
+    objectPositions.push(offset);
+    const streamObjText = `4 0 obj\n<< /Filter /FlateDecode /Length ${fakeCompressed.length} >>\nstream\n${fakeCompressed}\nendstream\nendobj\n`;
+    lines.push(streamObjText);
+    offset += streamObjText.length;
+
+    const xrefStart = offset;
+    lines.push("xref\n");
+    lines.push("0 5\n");
+    lines.push("0000000000 65535 f \n");
+    for (const pos of objectPositions) {
+      lines.push(`${String(pos).padStart(10, "0")} 00000 n \n`);
+    }
+    lines.push("trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n" + xrefStart + "\n%%EOF\n");
+
+    const buf = Buffer.from(lines.join(""), "latin1");
+    const result = verifyPerPageText(buf);
+    expect(result).toEqual({
+      totalPages: 1,
+      ocrTargetPages: 1,
+      verifiedPages: 0,
+    });
   });
 });

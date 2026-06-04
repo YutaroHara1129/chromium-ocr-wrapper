@@ -1,4 +1,4 @@
-export type ProgressState = { done: boolean };
+export type ProgressState = { ocrTriggered: boolean };
 
 export interface ViewerLike {
   docLength_?: number;
@@ -40,7 +40,7 @@ export function setupProgressInterceptor(
   controller.handlePluginMessage_ = function (msg: unknown) {
     const msgData = (msg as { data?: Record<string, unknown> } | undefined)?.data;
     if (msgData?.["type"] === "setHasSearchifyText") {
-      progress.done = true;
+      progress.ocrTriggered = true;
     }
     return original(msg);
   };
@@ -58,10 +58,3 @@ export async function scrollAllPages(
   }
 }
 
-export function pollProgressState(
-  progress: ProgressState,
-): { done: boolean } {
-  return {
-    done: progress.done,
-  };
-}

@@ -48,16 +48,27 @@ export class ConversionPipeline implements IConversionPipeline {
     if (analysis.kind === "text_only" || analysis.kind === "blank") {
       await copyFile(options.inputPath, outputPath);
     } else {
-      await this.searchifyPrinter.searchifyToFile(
+      const verification = await this.searchifyPrinter.searchifyToFile(
         options.inputPath,
         outputPath,
         {
           chromePath: options.chromePath,
           verbose: options.verbose,
-          ocrTimeoutMs: options.ocrTimeoutMs,
           onOcrProgress: options.onOcrProgress,
         },
       );
+
+      const outputStats = await stat(outputPath);
+
+      return {
+        inputPath: options.inputPath,
+        outputPath,
+        pageCount: analysis.pageCount,
+        textSize: outputStats.size,
+        kind: analysis.kind,
+        pagesMadeSearchable: verification.verifiedPages,
+        ocrVerification: verification,
+      };
     }
 
     const outputStats = await stat(outputPath);
@@ -68,10 +79,7 @@ export class ConversionPipeline implements IConversionPipeline {
       pageCount: analysis.pageCount,
       textSize: outputStats.size,
       kind: analysis.kind,
-      pagesMadeSearchable:
-        analysis.kind === "text_only" || analysis.kind === "blank"
-          ? 0
-          : analysis.pagesNeedingOcr,
+      pagesMadeSearchable: 0,
     };
   }
 

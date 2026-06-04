@@ -5,7 +5,6 @@ type SaveUploadResult =
 export type { SaveUploadResult };
 
 export interface SaveAndUploadParams {
-  searchifyOk: boolean;
   uploadUrl: string;
   saveTimeoutMs: number;
 }
@@ -21,10 +20,6 @@ export async function saveAndUpload(
   const ctrl = (viewer as Record<string, unknown>)["currentController"];
   if (!ctrl || typeof ctrl !== "object") {
     return { uploaded: false, reason: "NO_CONTROLLER" };
-  }
-
-  if (!params.searchifyOk) {
-    return { uploaded: false, reason: "OCR_INCOMPLETE" };
   }
 
   const ctrlObj = ctrl as Record<string, unknown>;

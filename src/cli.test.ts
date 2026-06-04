@@ -100,7 +100,7 @@ vi.mock("./core/pipeline.js", () => ({
 }));
 
 import { glob } from "glob";
-import { runCli, CLI_FLAGS } from "./cli.js";
+import { runCli, CLI_FLAGS, formatOcrReport, handleCliError } from "./cli.js";
 import { ChromeSearchifyPrinter } from "./core/chrome-searchify-printer.js";
 import { ConversionPipeline } from "./core/pipeline.js";
 
@@ -390,6 +390,22 @@ describe("runCli", () => {
     expect(process.exitCode).toBe(1);
   });
 
+  it("handles non-Error thrown values in conversion", async () => {
+    const errorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+
+    mocks.globMock.mockResolvedValue(["/docs/bad.pdf"]);
+    mocks.state.convertImplementation = vi.fn(async () => {
+      throw "string error";
+    });
+
+    await runCli(["node", "cli.js", "/docs/bad.pdf"]);
+
+    expect(errorSpy).toHaveBeenCalledWith("Failed: /docs/bad.pdf: string error");
+    expect(process.exitCode).toBe(1);
+  });
+
   it("printer cleanup runs in finally even on conversion throw", async () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
 
@@ -498,6 +514,50 @@ describe("runCli", () => {
         hasValue: false,
       },
     ]);
+  });
+
+  it("logs 'OCR not needed' for text_only PDF", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    mocks.globMock.mockResolvedValue(["/docs/text.pdf"]);
+    mocks.state.convertImplementation = vi.fn(
+      async (options: ConversionOptionsLike) => ({
+        inputPath: options.inputPath,
+        outputPath: options.inputPath.replace(/\.pdf$/i, "_searchable.pdf"),
+        pageCount: 1,
+        textSize: 0,
+        kind: "text_only",
+        pagesMadeSearchable: 0,
+      }),
+    );
+
+    await runCli(["node", "cli.js", "/docs/text.pdf"]);
+
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining("OCR not needed"),
+    );
+  });
+
+  it("logs 'OCR not needed' for blank PDF", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    mocks.globMock.mockResolvedValue(["/docs/blank.pdf"]);
+    mocks.state.convertImplementation = vi.fn(
+      async (options: ConversionOptionsLike) => ({
+        inputPath: options.inputPath,
+        outputPath: options.inputPath.replace(/\.pdf$/i, "_searchable.pdf"),
+        pageCount: 1,
+        textSize: 0,
+        kind: "blank",
+        pagesMadeSearchable: 0,
+      }),
+    );
+
+    await runCli(["node", "cli.js", "/docs/blank.pdf"]);
+
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining("OCR not needed"),
+    );
   });
 
   describe("multiple argument inputs", () => {
@@ -798,5 +858,125 @@ describe("runCli", () => {
         }),
       );
     });
+  });
+
+  it("logs verified pages report when ocrVerification is present (complete)", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    mocks.globMock.mockResolvedValue(["/docs/input.pdf"]);
+    mocks.state.convertImplementation = vi.fn(
+      async (options: ConversionOptionsLike) => ({
+        inputPath: options.inputPath,
+        outputPath: options.inputPath.replace(/\.pdf$/i, "_searchable.pdf"),
+        pageCount: 5,
+        textSize: 12000,
+        kind: "image_only",
+        pagesMadeSearchable: 3,
+        ocrVerification: { totalPages: 5, ocrTargetPages: 3, verifiedPages: 3 },
+      }),
+    );
+
+    await runCli(["node", "cli.js", "/docs/input.pdf"]);
+
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining("3/3 pages verified (OK), total 5 pages"),
+    );
+  });
+
+  it("logs INCOMPLETE when verifiedPages < ocrTargetPages", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    mocks.globMock.mockResolvedValue(["/docs/input.pdf"]);
+    mocks.state.convertImplementation = vi.fn(
+      async (options: ConversionOptionsLike) => ({
+        inputPath: options.inputPath,
+        outputPath: options.inputPath.replace(/\.pdf$/i, "_searchable.pdf"),
+        pageCount: 5,
+        textSize: 12000,
+        kind: "image_only",
+        pagesMadeSearchable: 3,
+        ocrVerification: { totalPages: 5, ocrTargetPages: 3, verifiedPages: 2 },
+      }),
+    );
+
+    await runCli(["node", "cli.js", "/docs/input.pdf"]);
+
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining("2/3 pages verified (INCOMPLETE), total 5 pages"),
+    );
+  });
+});
+
+describe("formatOcrReport", () => {
+  it("returns pages made searchable without verification", () => {
+    const result = formatOcrReport({
+      inputPath: "/test.pdf",
+      outputPath: "/test_searchable.pdf",
+      pageCount: 3,
+      textSize: 1000,
+      kind: "image_only",
+      pagesMadeSearchable: 3,
+    });
+    expect(result).toBe("3 pages made searchable");
+  });
+
+  it("returns OK report when all target pages verified", () => {
+    const result = formatOcrReport({
+      inputPath: "/test.pdf",
+      outputPath: "/test_searchable.pdf",
+      pageCount: 5,
+      textSize: 1000,
+      kind: "image_only",
+      pagesMadeSearchable: 3,
+      ocrVerification: { totalPages: 5, ocrTargetPages: 3, verifiedPages: 3 },
+    });
+    expect(result).toBe("3/3 pages verified (OK), total 5 pages");
+  });
+
+  it("returns INCOMPLETE report when not all target pages verified", () => {
+    const result = formatOcrReport({
+      inputPath: "/test.pdf",
+      outputPath: "/test_searchable.pdf",
+      pageCount: 5,
+      textSize: 1000,
+      kind: "image_only",
+      pagesMadeSearchable: 3,
+      ocrVerification: { totalPages: 5, ocrTargetPages: 3, verifiedPages: 1 },
+    });
+    expect(result).toBe("1/3 pages verified (INCOMPLETE), total 5 pages");
+  });
+});
+
+describe("handleCliError", () => {
+  afterEach(() => {
+    process.exitCode = undefined;
+  });
+
+  it("sets process.exitCode from error with numeric exitCode property", () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    handleCliError({ exitCode: 42 });
+    expect(process.exitCode).toBe(42);
+    expect(errorSpy).not.toHaveBeenCalled();
+  });
+
+  it("logs error and sets exitCode=1 for non-exitCode errors", () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    handleCliError(new Error("boom"));
+    expect(process.exitCode).toBe(1);
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("handles string exitCode by logging and setting exitCode=1", () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    handleCliError({ exitCode: "bad" });
+    expect(process.exitCode).toBe(1);
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("handles null/undefined error", () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    handleCliError(null);
+    expect(process.exitCode).toBe(1);
+    expect(errorSpy).toHaveBeenCalledWith(null);
   });
 });

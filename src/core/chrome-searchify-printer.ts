@@ -13,15 +13,13 @@ import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
 import type { Browser, Frame, Page } from "playwright-core";
-import type { IChromeSearchifyPrinter, SearchifyToFileOptions, OcrProgressCallback } from "../types/index.js";
-
-const DEFAULT_OCR_BASE_TIMEOUT_MS = 30_000;
-const DEFAULT_OCR_PER_PAGE_TIMEOUT_MS = 3_000;
+import type { IChromeSearchifyPrinter, SearchifyToFileOptions, OcrProgressCallback, OcrVerificationResult } from "../types/index.js";
 import {
   createUploadServer,
   type UploadServerResult,
 } from "../utils/upload-server.js";
 import { saveAndUpload } from "./viewer-save-ops.js";
+import { verifyPerPageText } from "../utils/pdf-info.js";
 
 const DEFAULT_CHROME_PATHS: Record<string, string[]> = {
   darwin: [
@@ -49,7 +47,7 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
     inputPath: string,
     outputPath: string,
     options?: SearchifyToFileOptions,
-  ): Promise<void> {
+  ): Promise<OcrVerificationResult> {
     const chromePath =
       options?.chromePath ?? (await this.findChrome());
     if (!chromePath) {
@@ -118,18 +116,10 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
 
       const viewerFrame = await this.waitForViewerFrame(page, options?.verbose);
 
-      const searchifyReady = await this.waitForSearchifyComplete(
-        viewerFrame,
-        {
-          verbose: options?.verbose,
-          ocrTimeoutMs: options?.ocrTimeoutMs,
-          onOcrProgress: options?.onOcrProgress,
-        },
-      );
-
-      if (!searchifyReady) {
-        throw new Error("OCR did not produce searchable output");
-      }
+      await this.waitForSearchifyComplete(viewerFrame, {
+        verbose: options?.verbose,
+        onOcrProgress: options?.onOcrProgress,
+      });
 
       const saveTimeoutMs = options?.saveTimeoutMs ?? 120_000;
       const uploadTimeoutMs = options?.uploadTimeoutMs ?? 120_000;
@@ -139,7 +129,6 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
       const uploadResult = await viewerFrame.evaluate(
         saveAndUpload,
         {
-          searchifyOk: searchifyReady,
           uploadUrl: uploadServer.url,
           saveTimeoutMs,
         },
@@ -164,11 +153,24 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
         await rename(tempOutputPath, outputPath);
       } else {
         throw new Error(
-          `OCR did not produce searchable output (${uploadResult.reason})`,
+          `Save failed (${uploadResult.reason})`,
         );
       }
 
       await uploadServer.close();
+      uploadServer = null;
+
+      const { readFile } = await import("node:fs/promises");
+      const outputBuffer = await readFile(outputPath);
+      const verification = verifyPerPageText(outputBuffer);
+
+      if (options?.verbose) {
+        console.error(
+          `[ChromeSearchifyPrinter] Verification: ${verification.verifiedPages}/${verification.ocrTargetPages} pages verified`,
+        );
+      }
+
+      return verification;
     } catch (error) {
       if (page) {
         try {
@@ -314,10 +316,9 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
     viewerFrame: Frame,
     options?: {
       verbose?: boolean;
-      ocrTimeoutMs?: number;
       onOcrProgress?: OcrProgressCallback;
     },
-  ): Promise<boolean> {
+  ): Promise<void> {
     const verbose = options?.verbose;
     const onOcrProgress = options?.onOcrProgress;
 
@@ -325,25 +326,25 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
       /* v8 ignore start -- browser-side callback; not executed in Node.js unit tests */
       async (): Promise<{
         pageCount: number;
-        doneAfterScroll: boolean;
+        ocrTriggered: boolean;
       }> => {
       const g = globalThis as Record<string, unknown>;
       const viewer = g["viewer"] as Record<string, unknown> | undefined;
       if (!viewer)
-        return { pageCount: 0, doneAfterScroll: false };
+        return { pageCount: 0, ocrTriggered: false };
 
       const ctrl = viewer["currentController"] as Record<string, unknown> | undefined;
       if (!ctrl)
-        return { pageCount: 0, doneAfterScroll: false };
+        return { pageCount: 0, ocrTriggered: false };
 
-      const progress: Record<string, boolean> = { done: false };
+      const progress: Record<string, boolean> = { ocrTriggered: false };
       g["__searchifyProgress"] = progress;
 
       const origHandle = (ctrl["handlePluginMessage_"] as Function).bind(ctrl);
       ctrl["handlePluginMessage_"] = function (msg: unknown) {
         const msgData = (msg as { data?: Record<string, unknown> })?.data;
         if (msgData?.["type"] === "setHasSearchifyText") {
-          progress.done = true;
+          progress.ocrTriggered = true;
         }
         return (origHandle as Function)(msg);
       };
@@ -372,69 +373,27 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
         }
       }
 
-      return { pageCount, doneAfterScroll: progress["done"] ?? false };
+      await new Promise((r) => setTimeout(r, pageCount * 100));
+
+      return { pageCount, ocrTriggered: progress["ocrTriggered"] ?? false };
     });
     /* v8 ignore end */
 
-    const { pageCount, doneAfterScroll } = setupResult;
-    const startTime = Date.now();
+    const { pageCount, ocrTriggered } = setupResult;
 
     if (verbose) {
       console.error(
-        `[ChromeSearchifyPrinter] Pages: ${pageCount}, doneAfterScroll: ${doneAfterScroll}`,
+        `[ChromeSearchifyPrinter] Pages: ${pageCount}, ocrTriggered: ${ocrTriggered}`,
       );
     }
 
-    if (pageCount === 0) return false;
-    if (doneAfterScroll) {
-      if (verbose) {
-        console.error("[ChromeSearchifyPrinter] OCR already complete after scrolling");
-      }
-      onOcrProgress?.({ type: "document-completed", pageCount, elapsedMs: Date.now() - startTime });
-      return true;
+    if (pageCount === 0) {
+      throw new Error("PDF has no pages to process");
     }
 
-    const ocrTimeoutMs = options?.ocrTimeoutMs ?? DEFAULT_OCR_BASE_TIMEOUT_MS + pageCount * DEFAULT_OCR_PER_PAGE_TIMEOUT_MS;
-    const pollIntervalMs = 500;
-    let pollCount = 0;
-
-    while (Date.now() - startTime < ocrTimeoutMs) {
-      const state = await viewerFrame.evaluate((): { done: boolean } => {
-        /* v8 ignore start -- browser-side callback; not executed in Node.js unit tests */
-        const g = globalThis as Record<string, unknown>;
-        const p = g["__searchifyProgress"] as Record<string, boolean> | undefined;
-        return { done: p?.["done"] ?? false };
-        /* v8 ignore end */
-      });
-
-      if (state.done) {
-        if (verbose) {
-          console.error(
-            `[ChromeSearchifyPrinter] OCR complete after ${Date.now() - startTime}ms`,
-          );
-        }
-        onOcrProgress?.({ type: "document-completed", pageCount, elapsedMs: Date.now() - startTime });
-        return true;
-      }
-
-      pollCount++;
-      if (verbose && pollCount % 10 === 0) {
-        console.error(
-          `[ChromeSearchifyPrinter] Waiting for OCR... ${Date.now() - startTime}ms elapsed (done=${state.done})`,
-        );
-      }
-
-      await new Promise((r) => setTimeout(r, pollIntervalMs));
+    if (onOcrProgress) {
+      onOcrProgress({ type: "document-completed", pageCount, elapsedMs: 0 });
     }
-
-    const elapsedMs = Date.now() - startTime;
-    if (verbose) {
-      console.error(
-        `[ChromeSearchifyPrinter] OCR timed out after ${elapsedMs}ms (timeout: ${ocrTimeoutMs}ms)`,
-      );
-    }
-    onOcrProgress?.({ type: "timeout", timeoutMs: ocrTimeoutMs, elapsedMs });
-    throw new Error(`OCR timed out after ${elapsedMs}ms (timeout: ${ocrTimeoutMs}ms)`);
   }
 
   private async setupProfile(verbose?: boolean): Promise<string> {

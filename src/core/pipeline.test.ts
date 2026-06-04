@@ -6,6 +6,7 @@ import type {
   IFileWriter,
   IPdfAnalyzer,
   PdfAnalysis,
+  OcrVerificationResult,
 } from "../types/index.js";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -78,9 +79,14 @@ function createMocks(): {
   pdfAnalyzer: IPdfAnalyzer;
   fileWriter: IFileWriter;
 } {
+  const defaultVerification: OcrVerificationResult = {
+    totalPages: 3,
+    ocrTargetPages: 3,
+    verifiedPages: 3,
+  };
   return {
     searchifyPrinter: {
-      searchifyToFile: vi.fn().mockResolvedValue(undefined),
+      searchifyToFile: vi.fn().mockResolvedValue(defaultVerification),
       close: vi.fn().mockResolvedValue(undefined),
     } as unknown as IChromeSearchifyPrinter,
     pdfAnalyzer: {
@@ -149,7 +155,6 @@ describe("ConversionPipeline", () => {
       {
         chromePath: undefined,
         verbose: undefined,
-        ocrTimeoutMs: undefined,
         onOcrProgress: undefined,
       },
     );
@@ -200,7 +205,8 @@ describe("ConversionPipeline", () => {
     });
 
     expect(result.kind).toBe("mixed");
-    expect(result.pagesMadeSearchable).toBe(2);
+    expect(result.pagesMadeSearchable).toBe(3);
+    expect(result.ocrVerification?.verifiedPages).toBe(3);
     expect(mocks.searchifyPrinter.searchifyToFile).toHaveBeenCalledTimes(1);
   });
 
@@ -312,7 +318,6 @@ describe("ConversionPipeline", () => {
       {
         chromePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
         verbose: true,
-        ocrTimeoutMs: undefined,
         onOcrProgress: undefined,
       },
     );
@@ -350,7 +355,7 @@ describe("ConversionPipeline", () => {
     expect(mocks.searchifyPrinter.searchifyToFile).not.toHaveBeenCalled();
   });
 
-  it("passes ocrTimeoutMs and onOcrProgress to searchifyToFile for image-only PDF", async () => {
+  it("passes onOcrProgress to searchifyToFile for image-only PDF", async () => {
     await setupStatForNewOutput(42);
     (mocks.pdfAnalyzer.analyze as ReturnType<typeof vi.fn>).mockResolvedValue(imageOnlyAnalysis());
 
@@ -359,7 +364,6 @@ describe("ConversionPipeline", () => {
     await pipeline.convert({
       inputPath: "/input/test.pdf",
       outputPath: "/output/test.pdf",
-      ocrTimeoutMs: 60_000,
       onOcrProgress,
     });
 
@@ -369,13 +373,12 @@ describe("ConversionPipeline", () => {
       {
         chromePath: undefined,
         verbose: undefined,
-        ocrTimeoutMs: 60_000,
         onOcrProgress,
       },
     );
   });
 
-  it("passes ocrTimeoutMs and onOcrProgress to searchifyToFile for mixed PDF", async () => {
+  it("passes onOcrProgress to searchifyToFile for mixed PDF", async () => {
     await setupStatForNewOutput(42);
     (mocks.pdfAnalyzer.analyze as ReturnType<typeof vi.fn>).mockResolvedValue(mixedAnalysis());
 
@@ -384,7 +387,6 @@ describe("ConversionPipeline", () => {
     await pipeline.convert({
       inputPath: "/input/test.pdf",
       outputPath: "/output/test.pdf",
-      ocrTimeoutMs: 45_000,
       onOcrProgress,
     });
 
@@ -394,7 +396,6 @@ describe("ConversionPipeline", () => {
       {
         chromePath: undefined,
         verbose: undefined,
-        ocrTimeoutMs: 45_000,
         onOcrProgress,
       },
     );
