@@ -270,8 +270,8 @@ function resolveStreamText(
     const refRegex = /(\d+)\s+\d+\s+R/g;
     let refMatch;
     const parts: string[] = [];
-    while ((refMatch = refRegex.exec(indirectArrayMatch[1])) !== null) {
-      const refNum = parseInt(refMatch[1], 10);
+    while ((refMatch = refRegex.exec(indirectArrayMatch[1]!)) !== null) {
+      const refNum = parseInt(refMatch[1]!, 10);
       if (refNum === objNum) continue;
       const resolved = resolveStreamText(text, buffer, refNum);
       if (resolved !== null) parts.push(resolved);
