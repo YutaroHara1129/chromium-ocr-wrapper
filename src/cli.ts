@@ -237,11 +237,6 @@ function resolveOutputPath(
 
   if (isDir) {
     const rel = relative(file.baseDir, file.absolutePath);
-    if (isAbsolute(rel) || rel.startsWith("..")) {
-      throw new Error(
-        `Resolved input path is outside its base directory: ${file.absolutePath}`,
-      );
-    }
     const name = basename(rel, extname(rel));
     const relDir = dirname(rel);
     return relDir === "."

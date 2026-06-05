@@ -701,6 +701,82 @@ describe("verifyPerPageText", () => {
     });
   });
 
+  it("handles page object with dictionary start far from /Type /Page", () => {
+    const padding = " ".repeat(2100);
+    const lines: string[] = ["%PDF-1.4"];
+    let offset = lines[0]!.length + 1;
+    const objectPositions: number[] = [];
+
+    const obj = (num: number, content: string): void => {
+      objectPositions.push(offset);
+      const text = `${num} 0 obj\n${content}\nendobj\n`;
+      lines.push(text);
+      offset += text.length;
+    };
+
+    obj(2, `<< /Type /Pages /Kids [3 0 R] /Count 1 >>`);
+    obj(1, `<< /Type /Catalog /Pages 2 0 R >>`);
+    obj(3, `<< ${padding} /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R>>`);
+    const content = "BT /F1 12 Tf (Hi) Tj ET";
+    obj(4, `<< /Length ${content.length} >>\nstream\n${content}\nendstream`);
+
+    const xrefStart = offset;
+    const totalObjs = 5;
+    lines.push("xref\n");
+    lines.push(`0 ${totalObjs}\n`);
+    lines.push("0000000000 65535 f \n");
+    for (const pos of objectPositions) {
+      lines.push(`${String(pos).padStart(10, "0")} 00000 n \n`);
+    }
+    lines.push(`trailer\n<< /Size ${totalObjs} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF\n`);
+
+    const result = verifyPerPageText(Buffer.from(lines.join(""), "latin1"));
+    expect(result).toEqual({
+      totalPages: 1,
+      ocrTargetPages: 1,
+      verifiedPages: 1,
+    });
+  });
+
+  it("resolves content streams through indirect reference arrays", () => {
+    const lines: string[] = ["%PDF-1.4"];
+    let offset = lines[0]!.length + 1;
+    const objectPositions: number[] = [];
+
+    const obj = (num: number, content: string): void => {
+      objectPositions.push(offset);
+      const text = `${num} 0 obj\n${content}\nendobj\n`;
+      lines.push(text);
+      offset += text.length;
+    };
+
+    obj(2, `<< /Type /Pages /Kids [3 0 R] /Count 1 >>`);
+    obj(1, `<< /Type /Catalog /Pages 2 0 R >>`);
+    obj(3, `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R>>`);
+    obj(4, `[5 0 R 6 0 R]`);
+    const c1 = "BT /F1 12 Tf (Hello) Tj ET";
+    const c2 = "BT /F1 12 Tf (World) Tj ET";
+    obj(5, `<< /Length ${c1.length} >>\nstream\n${c1}\nendstream`);
+    obj(6, `<< /Length ${c2.length} >>\nstream\n${c2}\nendstream`);
+
+    const xrefStart = offset;
+    const totalObjs = 7;
+    lines.push("xref\n");
+    lines.push(`0 ${totalObjs}\n`);
+    lines.push("0000000000 65535 f \n");
+    for (const pos of objectPositions) {
+      lines.push(`${String(pos).padStart(10, "0")} 00000 n \n`);
+    }
+    lines.push(`trailer\n<< /Size ${totalObjs} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF\n`);
+
+    const result = verifyPerPageText(Buffer.from(lines.join(""), "latin1"));
+    expect(result).toEqual({
+      totalPages: 1,
+      ocrTargetPages: 1,
+      verifiedPages: 1,
+    });
+  });
+
   it("handles FlateDecode stream with invalid compressed data gracefully", () => {
     const fakeCompressed = "this is not valid zlib data!!";
     const streamContent = "BT /F1 12 Tf (Hello) Tj ET";
