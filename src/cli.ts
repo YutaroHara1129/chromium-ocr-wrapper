@@ -1,6 +1,6 @@
 import { Command } from "commander";
-import { glob } from "glob";
-import { resolve, basename, extname, join, dirname, relative } from "node:path";
+import { glob, hasMagic } from "glob";
+import { resolve, basename, extname, join, dirname, relative, isAbsolute } from "node:path";
 import globParent from "glob-parent";
 import { statSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -90,6 +90,26 @@ export async function runCli(argv: string[]): Promise<void> {
         }
       }
 
+      if (options.output) {
+        const outDir = options.output as string;
+        let outIsDir = false;
+        try {
+          outIsDir = statSync(outDir).isDirectory();
+        } catch {}
+        if (outIsDir) {
+          for (const file of files) {
+            const rel = relative(file.baseDir, file.absolutePath);
+            if (isAbsolute(rel) || rel.startsWith("..")) {
+              console.error(
+                `Error: resolved input path is outside the output directory: ${file.absolutePath}`,
+              );
+              process.exitCode = 1;
+              return;
+            }
+          }
+        }
+      }
+
       const searchifyPrinter = new ChromeSearchifyPrinter();
       const pdfAnalyzer = new PdfInfoExtractor();
       const fileWriter = new NodeFileWriter();
@@ -165,7 +185,7 @@ async function resolveInputFiles(inputs: string[]): Promise<ResolvedFile[]> {
   for (const input of inputs) {
     const absInput = resolve(input);
     let isDir = false;
-    const hasGlob = input.includes("*") || input.includes("?");
+    const hasGlob = hasMagic(input, { magicalBraces: true });
     if (!hasGlob) {
       try {
         isDir = statSync(absInput).isDirectory();
@@ -217,6 +237,11 @@ function resolveOutputPath(
 
   if (isDir) {
     const rel = relative(file.baseDir, file.absolutePath);
+    if (isAbsolute(rel) || rel.startsWith("..")) {
+      throw new Error(
+        `Resolved input path is outside its base directory: ${file.absolutePath}`,
+      );
+    }
     const name = basename(rel, extname(rel));
     const relDir = dirname(rel);
     return relDir === "."

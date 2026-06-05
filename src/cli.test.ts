@@ -55,6 +55,10 @@ const mocks = vi.hoisted(() => {
 
 vi.mock("glob", () => ({
   glob: mocks.globMock,
+  hasMagic: vi.fn((pattern: string) => {
+    if (typeof pattern !== "string") return false;
+    return /[*?{}[\]]/.test(pattern);
+  }),
 }));
 
 vi.mock("node:fs", () => ({
@@ -717,6 +721,84 @@ describe("runCli", () => {
           outputPath: "/out/a_searchable.pdf",
         }),
       );
+    });
+
+    it("brace expansion without * resolves baseDir and keeps output under --output dir", async () => {
+      vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+      const cwd = process.cwd();
+      const inputPattern = `${cwd}/docs/{a,b}/file.pdf`;
+      mocks.globMock.mockImplementation((pattern: string) => {
+        if (pattern === inputPattern) {
+          return Promise.resolve([`${cwd}/docs/a/file.pdf`]);
+        }
+        return Promise.resolve([]);
+      });
+      mocks.statSyncMock.mockImplementation((p: string) => {
+        if (p === "/out") return { isDirectory: () => true } as ReturnType<typeof statSync>;
+        throw new Error("ENOENT");
+      });
+
+      await runCli(["node", "cli.js", "--output", "/out", "docs/{a,b}/file.pdf"]);
+
+      expect(mocks.pipelineInstances[0].convert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          inputPath: `${cwd}/docs/a/file.pdf`,
+          outputPath: "/out/a/file_searchable.pdf",
+        }),
+      );
+    });
+
+    it("character class without * resolves baseDir and keeps output under --output dir", async () => {
+      vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+      const cwd = process.cwd();
+      const inputPattern = `${cwd}/docs/[ab]/file.pdf`;
+      mocks.globMock.mockImplementation((pattern: string) => {
+        if (pattern === inputPattern) {
+          return Promise.resolve([`${cwd}/docs/a/file.pdf`]);
+        }
+        return Promise.resolve([]);
+      });
+      mocks.statSyncMock.mockImplementation((p: string) => {
+        if (p === "/out") return { isDirectory: () => true } as ReturnType<typeof statSync>;
+        throw new Error("ENOENT");
+      });
+
+      await runCli(["node", "cli.js", "--output", "/out", "docs/[ab]/file.pdf"]);
+
+      expect(mocks.pipelineInstances[0].convert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          inputPath: `${cwd}/docs/a/file.pdf`,
+          outputPath: "/out/a/file_searchable.pdf",
+        }),
+      );
+    });
+
+    it("rejects output path that escapes the --output directory", async () => {
+      const errorSpy = vi
+        .spyOn(console, "error")
+        .mockImplementation(() => undefined);
+
+      const cwd = process.cwd();
+      mocks.globMock.mockImplementation((pattern: string) => {
+        if (pattern.includes("outside")) {
+          return Promise.resolve(["/completely/different/file.pdf"]);
+        }
+        return Promise.resolve([]);
+      });
+      mocks.statSyncMock.mockImplementation((p: string) => {
+        if (p === "/out") return { isDirectory: () => true } as ReturnType<typeof statSync>;
+        throw new Error("ENOENT");
+      });
+
+      await runCli(["node", "cli.js", "--output", "/out", `${cwd}/outside/**/*.pdf`]);
+
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining("outside the output directory"),
+      );
+      expect(process.exitCode).toBe(1);
+      expect(ConversionPipeline).not.toHaveBeenCalled();
     });
   });
 
