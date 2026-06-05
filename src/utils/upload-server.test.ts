@@ -188,6 +188,37 @@ describe("createUploadServer", () => {
     }
   });
 
+  it("rejects done promise and cleans up partial file on request error", async () => {
+    const outputPath = join(tempDir, "output.pdf");
+    const server = await createUploadServer(outputPath, 5_000);
+
+    try {
+      const url = new URL(server.url);
+
+      await new Promise<void>((resolve) => {
+        const socket = new (require("node:net").Socket)();
+        socket.connect(parseInt(url.port!), url.hostname, () => {
+          socket.write(
+            `POST ${url.pathname}${url.search} HTTP/1.1\r\n` +
+            `Host: ${url.hostname}:${url.port}\r\n` +
+            `Content-Type: application/pdf\r\n` +
+            `Content-Length: 1000\r\n` +
+            `\r\n`,
+          );
+          socket.write(Buffer.alloc(10));
+          socket.destroy(new Error("simulated connection drop"));
+        });
+        socket.on("error", () => {});
+        socket.on("close", () => resolve());
+      });
+
+      await expect(server.done).rejects.toThrow();
+      await expect(stat(outputPath)).rejects.toThrow();
+    } finally {
+      await server.close();
+    }
+  });
+
   it("closes listener so subsequent requests fail", async () => {
     const outputPath = join(tempDir, "output.pdf");
     const server = await createUploadServer(outputPath, 5_000);

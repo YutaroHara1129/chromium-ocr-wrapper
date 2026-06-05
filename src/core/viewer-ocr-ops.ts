@@ -1,7 +1,6 @@
-export type ProgressState = { started: boolean; done: boolean };
+export type ProgressState = { ocrTriggered: boolean };
 
 export interface ViewerLike {
-  hasSearchifyText_?: boolean;
   docLength_?: number;
   documentDimensions?: { pageDimensions?: Array<unknown> };
   documentDimensions_?: { pageDimensions?: Array<unknown> };
@@ -40,12 +39,8 @@ export function setupProgressInterceptor(
   const original = controller.handlePluginMessage_.bind(controller);
   controller.handlePluginMessage_ = function (msg: unknown) {
     const msgData = (msg as { data?: Record<string, unknown> } | undefined)?.data;
-    if (msgData?.["type"] === "showSearchifyInProgress") {
-      if (msgData["show"] === true) {
-        progress.started = true;
-      } else if (msgData["show"] === false) {
-        progress.done = true;
-      }
+    if (msgData?.["type"] === "setHasSearchifyText") {
+      progress.ocrTriggered = true;
     }
     return original(msg);
   };
@@ -63,13 +58,3 @@ export async function scrollAllPages(
   }
 }
 
-export function pollProgressState(
-  viewer: ViewerLike,
-  progress: ProgressState,
-): { started: boolean; done: boolean; hasSearchifyText: boolean } {
-  return {
-    started: progress.started,
-    done: progress.done,
-    hasSearchifyText: viewer.hasSearchifyText_ ?? false,
-  };
-}

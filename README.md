@@ -106,13 +106,13 @@ The conversion proceeds through five stages.
 
 1. A temporary Chrome user-profile directory is created and populated with the Screen AI component data copied from the host Chrome installation. This ensures the OCR engine is available even in a fresh profile.
 
-2. Chrome is launched with `--remote-debugging-port` and `--enable-features=PdfSearchify,PdfSearchifySave`. The first feature flag activates the OCR pipeline inside the PDF viewer; the second enables the save endpoint that returns the searchified document.
+2. Chrome is launched with `--headless=new`, `--remote-debugging-port`, and `--enable-features=PdfSearchify,PdfSearchifySave`. The first flag suppresses download dialogs; the second activates the OCR pipeline inside the PDF viewer; the third enables the save endpoint that returns the searchified document.
 
-3. Playwright connects to Chrome over the Chrome DevTools Protocol (CDP) and opens the input PDF in a new tab. After a short wait, the tool accesses the PDF viewer's extension frame (the second frame in the page) and polls the `hasSearchifyText_` flag until OCR completes.
+3. Playwright connects to Chrome over the Chrome DevTools Protocol (CDP) and opens the input PDF in a new tab. The tool waits for the PDF viewer extension frame, then runs `scrollAllPages` inside the frame to step through every page via `viewport.goToPage()`, triggering OCR on each. A `handlePluginMessage_` interceptor records the `showSearchifyInProgress` progress signals. After scrolling, the polling loop checks `hasSearchifyText_` and the progress interceptor's `done` flag; either being true means OCR is complete.
 
-4. The viewer controller's `save("SEARCHIFIED")` method is called through `page.evaluate`. Before calling save, the `handlePluginMessage_` handler is rebound to preserve the original binding that the plugin relies on. The method returns an `ArrayBuffer` containing the PDF with an invisible text layer overlaid on each page. If OCR did not activate (for example on a PDF that already contains text), the tool falls back to `save("ORIGINAL")`, and if that also returns nothing it copies the input file as-is.
+4. The viewer controller's `save("SEARCHIFIED")` method is called through `page.evaluate`. Before calling save, the `handlePluginMessage_` handler is rebound to preserve the original binding that the plugin relies on. The method returns an `ArrayBuffer` containing the PDF with an invisible text layer overlaid on each page. The bytes are uploaded to a temporary local HTTP server started by the tool, which writes them to disk, avoiding serialization overhead for large files.
 
-5. The resulting bytes are written to the output path.
+5. The resulting file is renamed to the final output path.
 
 The invisible text layer uses PDF text-rendering mode 3 (invisible) and UCS-16BE character encoding. The original page images are preserved exactly as they appeared in the input, making the output a lossless addition of searchability.
 
@@ -123,9 +123,12 @@ src/
   types/index.ts                 DI interfaces and shared types
   core/
     chrome-searchify-printer.ts  Chrome + Playwright CDP + save('SEARCHIFIED')
+    viewer-ocr-ops.ts            OCR progress interception and page scrolling
+    viewer-save-ops.ts           save/upload logic executed in the viewer frame
     pipeline.ts                  Orchestrates the full conversion
   utils/
-    pdf-info.ts                  Reads page count and dimensions via pdf-lib
+    pdf-info.ts                  Reads page count via lightweight PDF parsing
+    upload-server.ts             Local HTTP server for streaming large PDFs from Chrome
     file-writer.ts               Abstracts fs.writeFile and mkdir
   cli.ts                         Commander-based CLI entry point
   index.ts                       Public library exports
@@ -152,7 +155,7 @@ npm run test:e2e       # End-to-end tests (requires system Chrome + Screen AI)
 npm run test:coverage  # Coverage report
 ```
 
-The E2E tests create image-only PDFs with the `canvas` package, convert them through the real pipeline, and verify that the output contains PDF text operators. They require a running display (not a headless environment) because Chrome's PDF viewer extension does not function in headless mode.
+The E2E tests create image-only PDFs with the `canvas` package, convert them through the real pipeline, and verify that the output contains PDF text operators. They run unconditionally against the system Chrome installation and require the Screen AI component to be present. The test matrix covers single-file, multi-file, and directory inputs across image-only, text-only, mixed, and blank content types at both 1-page and 250-page scales.
 
 ## Troubleshooting
 
@@ -164,7 +167,7 @@ OCR did not complete — The Screen AI component may be missing. Open Chrome nor
 
 No PDFs found matching the input pattern — Ensure the glob pattern is quoted on the shell to prevent premature expansion (`"*.pdf"` rather than `*.pdf`).
 
-Save returned no data — For PDFs that already contain text, Chrome does not produce a searchified variant. The tool falls back to copying the original PDF in this case.
+Save returned no data — The `save("SEARCHIFIED")` call returned no data, which typically indicates that Chrome's PDF viewer did not produce a searchified document. This should not occur for image-only PDFs; file a bug if it does.
 
 ## License
 

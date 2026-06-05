@@ -1,16 +1,21 @@
 import { readFile } from "node:fs/promises";
 import { inflateSync } from "node:zlib";
-import type { IPdfInfoExtractor, PdfMetadata } from "../types/index.js";
+import type { IPdfInfoExtractor, IPdfAnalyzer, PdfMetadata, PdfAnalysis, PdfKind, OcrVerificationResult } from "../types/index.js";
 
 const MAX_DECOMPRESSED_STREAM_SIZE = 256 * 1024;
 
 const MAX_TOTAL_BUDGET = 2 * 1024 * 1024;
 
-export class PdfInfoExtractor implements IPdfInfoExtractor {
+export class PdfInfoExtractor implements IPdfInfoExtractor, IPdfAnalyzer {
   async getMetadataFromFile(filePath: string): Promise<PdfMetadata> {
     const buffer = await readFile(filePath);
     const pageCount = extractPageCount(buffer);
     return { pageCount };
+  }
+
+  async analyze(filePath: string): Promise<PdfAnalysis> {
+    const buffer = await readFile(filePath);
+    return analyzePdfContent(buffer);
   }
 }
 
@@ -100,4 +105,206 @@ function* flateStreamIterator(
       continue;
     }
   }
+}
+
+const FONT_INDICATOR = /\/BaseFont\b/;
+const IMAGE_INDICATOR = /\/Subtype\s*\/Image\b/;
+
+export function analyzePdfContent(buffer: Buffer): PdfAnalysis {
+  const text = buffer.toString("latin1");
+
+  if (buffer.length === 0) {
+    return {
+      pageCount: 0,
+      kind: "blank",
+      hasExtractableText: false,
+      hasImages: false,
+      pagesNeedingOcr: 0,
+    };
+  }
+
+  if (!text.startsWith("%PDF-")) {
+    return {
+      pageCount: 0,
+      kind: "unknown",
+      hasExtractableText: false,
+      hasImages: false,
+      pagesNeedingOcr: 0,
+    };
+  }
+
+  const pageCount = extractPageCount(buffer);
+
+  let hasExtractableText = FONT_INDICATOR.test(text);
+  let hasImages = IMAGE_INDICATOR.test(text);
+
+  if (!hasExtractableText || !hasImages) {
+    let totalDecompressed = 0;
+    for (const streamText of flateStreamIterator(text, buffer)) {
+      totalDecompressed += streamText.length;
+      if (totalDecompressed > MAX_TOTAL_BUDGET) break;
+
+      if (!hasExtractableText && FONT_INDICATOR.test(streamText)) {
+        hasExtractableText = true;
+      }
+      if (!hasImages && IMAGE_INDICATOR.test(streamText)) {
+        hasImages = true;
+      }
+      if (hasExtractableText && hasImages) break;
+    }
+  }
+
+  const kind = classifyPdfKind(hasExtractableText, hasImages, pageCount);
+  const pagesNeedingOcr =
+    kind === "image_only" || kind === "mixed" ? pageCount : 0;
+
+  return { pageCount, kind, hasExtractableText, hasImages, pagesNeedingOcr };
+}
+
+function classifyPdfKind(
+  hasText: boolean,
+  hasImages: boolean,
+  pageCount: number,
+): PdfKind {
+  if (pageCount === 0) return "blank";
+  if (hasText && hasImages) return "mixed";
+  if (hasText) return "text_only";
+  if (hasImages) return "image_only";
+  return "blank";
+}
+
+export function verifyPerPageText(buffer: Buffer): OcrVerificationResult {
+  const text = buffer.toString("latin1");
+
+  if (buffer.length === 0 || !text.startsWith("%PDF-")) {
+    return { totalPages: 0, ocrTargetPages: 0, verifiedPages: 0 };
+  }
+
+  const totalPages = extractPageCount(buffer);
+  const pageRefs = collectPageContentRefs(text, buffer);
+  let verifiedPages = 0;
+
+  for (const refs of pageRefs) {
+    for (const refNum of refs) {
+      const content = resolveStreamText(text, buffer, refNum);
+      if (content !== null && /\bBT\b/.test(content)) {
+        verifiedPages++;
+        break;
+      }
+    }
+  }
+
+  return { totalPages, ocrTargetPages: totalPages, verifiedPages };
+}
+
+function collectPageContentRefsFromText(text: string): number[][] {
+  const result: number[][] = [];
+  const pageRegex = /\/Type\s*\/Page\b(?!s)/g;
+  let match;
+
+  while ((match = pageRegex.exec(text)) !== null) {
+    const endobjIdx = text.indexOf("endobj", match.index);
+    const windowEnd = endobjIdx !== -1
+      ? endobjIdx
+      : Math.min(text.length, match.index + 2000);
+
+    const dictStart = text.lastIndexOf("<<", match.index);
+    const regionStart = dictStart !== -1 && dictStart > match.index - 2000
+      ? dictStart
+      : match.index;
+    const region = text.substring(regionStart, windowEnd);
+
+    const arrayMatch = region.match(/\/Contents\s*\[\s*([^\]]+)\]/);
+    if (arrayMatch && arrayMatch[1]) {
+      const refs: number[] = [];
+      const refRegex = /(\d+)\s+\d+\s+R/g;
+      let refMatch;
+      while ((refMatch = refRegex.exec(arrayMatch[1])) !== null) {
+        refs.push(parseInt(refMatch[1]!, 10));
+      }
+      if (refs.length > 0) result.push(refs);
+      continue;
+    }
+
+    const singleMatch = region.match(/\/Contents\s+(\d+)\s+\d+\s+R/);
+    if (singleMatch && singleMatch[1]) {
+      result.push([parseInt(singleMatch[1], 10)]);
+    }
+  }
+
+  return result;
+}
+
+function collectPageContentRefs(text: string, buffer: Buffer): number[][] {
+  const fromRawText = collectPageContentRefsFromText(text);
+  if (fromRawText.length > 0) return fromRawText;
+
+  let totalDecompressed = 0;
+  for (const streamText of flateStreamIterator(text, buffer)) {
+    totalDecompressed += streamText.length;
+    if (totalDecompressed > MAX_TOTAL_BUDGET) break;
+    const fromStream = collectPageContentRefsFromText(streamText);
+    if (fromStream.length > 0) return fromStream;
+  }
+
+  return [];
+}
+
+function resolveStreamText(
+  text: string,
+  buffer: Buffer,
+  objNum: number,
+): string | null {
+  const objPattern = new RegExp(`\\b${objNum}\\s+0\\s+obj\\b`);
+  const objMatch = objPattern.exec(text);
+  if (!objMatch) return null;
+
+  const objStart = objMatch.index;
+  const endobjIdx = text.indexOf("endobj", objStart);
+  if (endobjIdx === -1) return null;
+
+  const objBody = text.substring(objStart, endobjIdx);
+
+  const indirectArrayMatch = objBody.match(/\[\s*((?:\d+\s+\d+\s+R\s*)+)\]/);
+  if (indirectArrayMatch) {
+    const refRegex = /(\d+)\s+\d+\s+R/g;
+    let refMatch;
+    const parts: string[] = [];
+    while ((refMatch = refRegex.exec(indirectArrayMatch[1]!)) !== null) {
+      const refNum = parseInt(refMatch[1]!, 10);
+      if (refNum === objNum) continue;
+      const resolved = resolveStreamText(text, buffer, refNum);
+      if (resolved !== null) parts.push(resolved);
+    }
+    return parts.length > 0 ? parts.join("\n") : null;
+  }
+
+  const streamMarkerMatch = objBody.match(/stream\r?\n/);
+  if (!streamMarkerMatch || streamMarkerMatch.index === undefined) return null;
+
+  const dataStart = objStart + streamMarkerMatch.index + streamMarkerMatch[0].length;
+  const endstreamIdx = text.indexOf("endstream", dataStart);
+  if (endstreamIdx === -1 || endstreamIdx >= endobjIdx) return null;
+
+  let dataEnd = endstreamIdx;
+  while (
+    dataEnd > dataStart &&
+    (text[dataEnd - 1] === "\n" || text[dataEnd - 1] === "\r")
+  ) {
+    dataEnd--;
+  }
+
+  if (/\/Filter\s*(\/FlateDecode|\[\s*\/FlateDecode)/.test(objBody)) {
+    try {
+      const compressed = buffer.subarray(dataStart, dataEnd);
+      const decompressed = inflateSync(compressed, {
+        maxOutputLength: MAX_DECOMPRESSED_STREAM_SIZE,
+      });
+      return decompressed.toString("latin1");
+    } catch {
+      return null;
+    }
+  }
+
+  return text.substring(dataStart, dataEnd);
 }

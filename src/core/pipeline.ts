@@ -1,8 +1,8 @@
 import { dirname, join, extname, basename } from "node:path";
-import { stat } from "node:fs/promises";
+import { copyFile, stat } from "node:fs/promises";
 import type {
   IChromeSearchifyPrinter,
-  IPdfInfoExtractor,
+  IPdfAnalyzer,
   IFileWriter,
   IConversionPipeline,
   ConversionOptions,
@@ -12,7 +12,7 @@ import type {
 export class ConversionPipeline implements IConversionPipeline {
   constructor(
     private readonly searchifyPrinter: IChromeSearchifyPrinter,
-    private readonly pdfInfoExtractor: IPdfInfoExtractor,
+    private readonly pdfAnalyzer: IPdfAnalyzer,
     private readonly fileWriter: IFileWriter,
   ) {}
 
@@ -39,26 +39,47 @@ export class ConversionPipeline implements IConversionPipeline {
       }
     }
 
-    const { pageCount } = await this.pdfInfoExtractor.getMetadataFromFile(
-      options.inputPath,
-    );
+    const analysis = await this.pdfAnalyzer.analyze(options.inputPath);
 
-    await this.searchifyPrinter.searchifyToFile(
-      options.inputPath,
-      outputPath,
-      {
-        chromePath: options.chromePath,
-        verbose: options.verbose,
-      },
-    );
+    if (analysis.kind === "unknown") {
+      throw new Error("File is not a valid PDF");
+    }
+
+    if (analysis.kind === "text_only" || analysis.kind === "blank") {
+      await copyFile(options.inputPath, outputPath);
+    } else {
+      const verification = await this.searchifyPrinter.searchifyToFile(
+        options.inputPath,
+        outputPath,
+        {
+          chromePath: options.chromePath,
+          verbose: options.verbose,
+          onOcrProgress: options.onOcrProgress,
+        },
+      );
+
+      const outputStats = await stat(outputPath);
+
+      return {
+        inputPath: options.inputPath,
+        outputPath,
+        pageCount: analysis.pageCount,
+        textSize: outputStats.size,
+        kind: analysis.kind,
+        pagesMadeSearchable: verification.verifiedPages,
+        ocrVerification: verification,
+      };
+    }
 
     const outputStats = await stat(outputPath);
 
     return {
       inputPath: options.inputPath,
       outputPath,
-      pageCount,
+      pageCount: analysis.pageCount,
       textSize: outputStats.size,
+      kind: analysis.kind,
+      pagesMadeSearchable: 0,
     };
   }
 
