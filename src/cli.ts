@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import { glob } from "glob";
 import { resolve, basename, extname, join, dirname, relative } from "node:path";
+import globParent from "glob-parent";
 import { statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { ChromeSearchifyPrinter } from "./core/chrome-searchify-printer.js";
@@ -181,7 +182,7 @@ async function resolveInputFiles(inputs: string[]): Promise<ResolvedFile[]> {
       baseDir = absInput;
     } else {
       globPattern = absInput;
-      baseDir = dirname(absInput);
+      baseDir = hasGlob ? resolve(globParent(absInput)) : dirname(absInput);
     }
 
     const matches = await glob(globPattern, {

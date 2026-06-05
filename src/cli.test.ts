@@ -628,6 +628,98 @@ describe("runCli", () => {
     });
   });
 
+  describe("glob output path resolution", () => {
+    it("recursive glob with --output directory keeps nested outputs under the output dir", async () => {
+      vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+      const cwd = process.cwd();
+      const inputPattern = `${cwd}/docs/**/*.pdf`;
+      mocks.globMock.mockImplementation((pattern: string) => {
+        if (pattern === inputPattern) {
+          return Promise.resolve([`${cwd}/docs/sub/nested.pdf`]);
+        }
+        return Promise.resolve([]);
+      });
+      mocks.statSyncMock.mockImplementation((p: string) => {
+        if (p === "/out") return { isDirectory: () => true } as ReturnType<typeof statSync>;
+        throw new Error("ENOENT");
+      });
+
+      await runCli(["node", "cli.js", "--output", "/out", "docs/**/*.pdf"]);
+
+      expect(glob).toHaveBeenCalledWith(inputPattern, {
+        absolute: true,
+        nodir: true,
+      });
+      expect(mocks.pipelineInstances[0].convert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          inputPath: `${cwd}/docs/sub/nested.pdf`,
+          outputPath: "/out/sub/nested_searchable.pdf",
+        }),
+      );
+    });
+
+    it("glob with literal prefix and --output directory keeps the prefix structure", async () => {
+      vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+      const cwd = process.cwd();
+      const inputPattern = `${cwd}/docs/2024/*.pdf`;
+      mocks.globMock.mockImplementation((pattern: string) => {
+        if (pattern === inputPattern) {
+          return Promise.resolve([`${cwd}/docs/2024/report.pdf`]);
+        }
+        return Promise.resolve([]);
+      });
+      mocks.statSyncMock.mockImplementation((p: string) => {
+        if (p === "/out") return { isDirectory: () => true } as ReturnType<typeof statSync>;
+        throw new Error("ENOENT");
+      });
+
+      await runCli(["node", "cli.js", "--output", "/out", "docs/2024/*.pdf"]);
+
+      expect(glob).toHaveBeenCalledWith(inputPattern, {
+        absolute: true,
+        nodir: true,
+      });
+      expect(mocks.pipelineInstances[0].convert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          inputPath: `${cwd}/docs/2024/report.pdf`,
+          outputPath: "/out/report_searchable.pdf",
+        }),
+      );
+    });
+
+    it("glob without a directory prefix maps directly under the output dir", async () => {
+      vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+      const cwd = process.cwd();
+      const inputPattern = `${cwd}/*.pdf`;
+      mocks.globMock.mockImplementation((pattern: string) => {
+        if (pattern === inputPattern) {
+          return Promise.resolve([`${cwd}/a.pdf`]);
+        }
+        return Promise.resolve([]);
+      });
+      mocks.statSyncMock.mockImplementation((p: string) => {
+        if (p === "/out") return { isDirectory: () => true } as ReturnType<typeof statSync>;
+        throw new Error("ENOENT");
+      });
+
+      await runCli(["node", "cli.js", "--output", "/out", "*.pdf"]);
+
+      expect(glob).toHaveBeenCalledWith(inputPattern, {
+        absolute: true,
+        nodir: true,
+      });
+      expect(mocks.pipelineInstances[0].convert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          inputPath: `${cwd}/a.pdf`,
+          outputPath: "/out/a_searchable.pdf",
+        }),
+      );
+    });
+  });
+
   describe("directory inputs", () => {
     it("directory input is resolved recursively, --output absent", async () => {
       vi.spyOn(console, "log").mockImplementation(() => undefined);
