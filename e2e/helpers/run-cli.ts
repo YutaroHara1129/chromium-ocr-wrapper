@@ -18,7 +18,7 @@ export interface RunCliResult {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "../..");
-const cliPath = resolve(repoRoot, "dist/cli.js");
+const cliPath = resolve(repoRoot, "dist/cli-entry.js");
 
 async function assertBuiltCliExists(): Promise<void> {
   try {
