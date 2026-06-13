@@ -108,7 +108,7 @@ describe("E2E: OCR pipeline with real Chrome", () => {
       const diag = `exitCode=${result.exitCode} stderr=${result.stderr} stdout=${result.stdout}`;
       expect(result, diag).toMatchObject({ exitCode: 0 });
       expect(result.stdout, diag).toContain("Done:");
-      expect(result.stdout, diag).toContain("pages made searchable");
+      expect(result.stdout, diag).toContain("pages verified");
 
       const outputBytes = await readFile(outputPdf);
       expect(outputBytes.length).toBeGreaterThan(0);
@@ -133,7 +133,7 @@ describe("E2E: OCR pipeline with real Chrome", () => {
       expect(result, diag).toMatchObject({ exitCode: 0 });
       expect(result.stdout, diag).toContain("Done:");
       expect(result.stdout, diag).toContain(`${PAGE_COUNT} pages`);
-      expect(result.stdout, diag).toContain("pages made searchable");
+      expect(result.stdout, diag).toContain("pages verified");
 
       const outputBytes = await readFile(outputPdf);
       expect(outputBytes.length, "output must not be empty").toBeGreaterThan(0);
@@ -187,7 +187,7 @@ describe("E2E: OCR pipeline with real Chrome", () => {
       expect(result, diag).toMatchObject({ exitCode: 0 });
       expect(result.stdout, diag).toContain("Done:");
       expect(result.stdout, diag).toContain(`${PAGE_COUNT} pages`);
-      expect(result.stdout, diag).toContain("pages made searchable");
+      expect(result.stdout, diag).toContain("pages verified");
 
       const outputBytes = await readFile(outputPdf);
       expect(outputBytes.length).toBeGreaterThan(0);

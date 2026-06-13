@@ -231,4 +231,43 @@ describe("scrollAllPages", () => {
 
     await scrollAllPages(viewer, 5);
   });
+
+  it("invokes onPageScrolled callback for each page in order", async () => {
+    const goToPage = vi.fn();
+    const viewer = createViewer({ viewport_: { goToPage } });
+    const events: Array<{ pageIndex: number; pageCount: number }> = [];
+
+    const promise = scrollAllPages(viewer, 3, (pageIndex, pageCount) => {
+      events.push({ pageIndex, pageCount });
+    });
+    await vi.advanceTimersByTimeAsync(900);
+    await promise;
+
+    expect(events).toEqual([
+      { pageIndex: 0, pageCount: 3 },
+      { pageIndex: 1, pageCount: 3 },
+      { pageIndex: 2, pageCount: 3 },
+    ]);
+  });
+
+  it("does not invoke callback when pageCount is 0", async () => {
+    const goToPage = vi.fn();
+    const viewer = createViewer({ viewport_: { goToPage } });
+    const onPageScrolled = vi.fn();
+
+    await scrollAllPages(viewer, 0, onPageScrolled);
+
+    expect(onPageScrolled).not.toHaveBeenCalled();
+  });
+
+  it("works without callback (backward compatible)", async () => {
+    const goToPage = vi.fn();
+    const viewer = createViewer({ viewport_: { goToPage } });
+
+    const promise = scrollAllPages(viewer, 2);
+    await vi.advanceTimersByTimeAsync(600);
+    await promise;
+
+    expect(goToPage).toHaveBeenCalledTimes(2);
+  });
 });

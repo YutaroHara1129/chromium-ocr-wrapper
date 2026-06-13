@@ -8,7 +8,7 @@ import { ChromeSearchifyPrinter } from "./core/chrome-searchify-printer.js";
 import { PdfInfoExtractor } from "./utils/pdf-info.js";
 import { ConversionPipeline } from "./core/pipeline.js";
 import { NodeFileWriter } from "./utils/file-writer.js";
-import type { ConversionOptions, ConversionResult } from "./types/index.js";
+import type { ConversionOptions, ConversionResult, OcrProgressCallback } from "./types/index.js";
 
 const require = createRequire(import.meta.url);
 const pkgVersion = require("../package.json").version;
@@ -135,12 +135,41 @@ export async function runCli(argv: string[]): Promise<void> {
 
       try {
         for (const file of files) {
+          const onOcrProgress: OcrProgressCallback | undefined =
+            options.verbose
+              ? (event) => {
+                  switch (event.type) {
+                    case "page-scrolled":
+                      process.stderr.write(
+                        `\r[scrolling] ${event.pageIndex + 1}/${event.pageCount}`,
+                      );
+                      break;
+                    case "ocr-waiting":
+                      process.stderr.write(
+                        `\n[ocr] waiting ${event.waitMs}ms for OCR buffer\n`,
+                      );
+                      break;
+                    case "document-completed":
+                      process.stderr.write(
+                        `[ocr] completed ${event.pageCount} pages\n`,
+                      );
+                      break;
+                    case "timeout":
+                      process.stderr.write(
+                        `[ocr] timeout after ${event.elapsedMs}ms / ${event.timeoutMs}ms\n`,
+                      );
+                      break;
+                  }
+                }
+              : undefined;
+
           const conversionOptions: ConversionOptions = {
             inputPath: file.absolutePath,
             outputPath: resolveOutputPath(file, options),
             overwrite: options.overwrite as boolean | undefined,
             verbose: options.verbose as boolean | undefined,
             chromePath: options.chromePath as string | undefined,
+            onOcrProgress,
           };
 
           if (options.verbose) {

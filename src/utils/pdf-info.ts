@@ -2,9 +2,9 @@ import { readFile } from "node:fs/promises";
 import { inflateSync } from "node:zlib";
 import type { IPdfInfoExtractor, IPdfAnalyzer, PdfMetadata, PdfAnalysis, PdfKind, OcrVerificationResult } from "../types/index.js";
 
-const MAX_DECOMPRESSED_STREAM_SIZE = 256 * 1024;
+const MAX_DECOMPRESSED_STREAM_SIZE = 1024 * 1024;
 
-const MAX_TOTAL_BUDGET = 2 * 1024 * 1024;
+const MAX_TOTAL_BUDGET = 10 * 1024 * 1024;
 
 export class PdfInfoExtractor implements IPdfInfoExtractor, IPdfAnalyzer {
   async getMetadataFromFile(filePath: string): Promise<PdfMetadata> {
@@ -181,13 +181,13 @@ export function verifyPerPageText(buffer: Buffer): OcrVerificationResult {
   }
 
   const totalPages = extractPageCount(buffer);
-  const pageRefs = collectPageContentRefs(text, buffer);
+  const pageRefs = collectPageContentRefs(text, buffer, totalPages);
   let verifiedPages = 0;
 
   for (const refs of pageRefs) {
     for (const refNum of refs) {
       const content = resolveStreamText(text, buffer, refNum);
-      if (content !== null && /\bBT\b/.test(content)) {
+      if (content !== null && /\b(?:BT|Tj|TJ|Td)\b/.test(content)) {
         verifiedPages++;
         break;
       }
@@ -208,9 +208,12 @@ function collectPageContentRefsFromText(text: string): number[][] {
       ? endobjIdx
       : Math.min(text.length, match.index + 2000);
 
-    const dictStart = text.lastIndexOf("<<", match.index);
-    const regionStart = dictStart !== -1 && dictStart > match.index - 2000
-      ? dictStart
+    const searchStart = Math.max(0, match.index - 10000);
+    const searchRegion = text.substring(searchStart, match.index);
+    const objMatches = [...searchRegion.matchAll(/\b(\d+)\s+\d+\s+obj\b/g)];
+    const lastObjMatch = objMatches.length > 0 ? objMatches[objMatches.length - 1] : null;
+    const regionStart = lastObjMatch && lastObjMatch.index !== undefined
+      ? searchStart + lastObjMatch.index
       : match.index;
     const region = text.substring(regionStart, windowEnd);
 
@@ -228,26 +231,26 @@ function collectPageContentRefsFromText(text: string): number[][] {
 
     const singleMatch = region.match(/\/Contents\s+(\d+)\s+\d+\s+R/);
     if (singleMatch && singleMatch[1]) {
-      result.push([parseInt(singleMatch[1], 10)]);
+      result.push([parseInt(singleMatch[1]!, 10)]);
     }
   }
 
   return result;
 }
 
-function collectPageContentRefs(text: string, buffer: Buffer): number[][] {
+function collectPageContentRefs(text: string, buffer: Buffer, expectedPageCount: number): number[][] {
   const fromRawText = collectPageContentRefsFromText(text);
-  if (fromRawText.length > 0) return fromRawText;
+  if (fromRawText.length === expectedPageCount) return fromRawText;
 
   let totalDecompressed = 0;
   for (const streamText of flateStreamIterator(text, buffer)) {
     totalDecompressed += streamText.length;
     if (totalDecompressed > MAX_TOTAL_BUDGET) break;
     const fromStream = collectPageContentRefsFromText(streamText);
-    if (fromStream.length > 0) return fromStream;
+    if (fromStream.length === expectedPageCount) return fromStream;
   }
 
-  return [];
+  return fromRawText;
 }
 
 function resolveStreamText(
@@ -255,7 +258,7 @@ function resolveStreamText(
   buffer: Buffer,
   objNum: number,
 ): string | null {
-  const objPattern = new RegExp(`\\b${objNum}\\s+0\\s+obj\\b`);
+  const objPattern = new RegExp(`\\b${objNum}\\s+\\d+\\s+obj\\b`);
   const objMatch = objPattern.exec(text);
   if (!objMatch) return null;
 
@@ -265,22 +268,23 @@ function resolveStreamText(
 
   const objBody = text.substring(objStart, endobjIdx);
 
-  const indirectArrayMatch = objBody.match(/\[\s*((?:\d+\s+\d+\s+R\s*)+)\]/);
-  if (indirectArrayMatch) {
-    const refRegex = /(\d+)\s+\d+\s+R/g;
-    let refMatch;
-    const parts: string[] = [];
-    while ((refMatch = refRegex.exec(indirectArrayMatch[1]!)) !== null) {
-      const refNum = parseInt(refMatch[1]!, 10);
-      if (refNum === objNum) continue;
-      const resolved = resolveStreamText(text, buffer, refNum);
-      if (resolved !== null) parts.push(resolved);
-    }
-    return parts.length > 0 ? parts.join("\n") : null;
-  }
-
   const streamMarkerMatch = objBody.match(/stream\r?\n/);
-  if (!streamMarkerMatch || streamMarkerMatch.index === undefined) return null;
+  if (!streamMarkerMatch || streamMarkerMatch.index === undefined) {
+    const indirectArrayMatch = objBody.match(/\[\s*((?:\d+\s+\d+\s+R\s*)+)\]/);
+    if (indirectArrayMatch) {
+      const refRegex = /(\d+)\s+\d+\s+R/g;
+      let refMatch;
+      const parts: string[] = [];
+      while ((refMatch = refRegex.exec(indirectArrayMatch[1]!)) !== null) {
+        const refNum = parseInt(refMatch[1]!, 10);
+        if (refNum === objNum) continue;
+        const resolved = resolveStreamText(text, buffer, refNum);
+        if (resolved !== null) parts.push(resolved);
+      }
+      return parts.length > 0 ? parts.join("\n") : null;
+    }
+    return null;
+  }
 
   const dataStart = objStart + streamMarkerMatch.index + streamMarkerMatch[0].length;
   const endstreamIdx = text.indexOf("endstream", dataStart);
