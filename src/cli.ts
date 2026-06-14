@@ -154,6 +154,11 @@ export async function runCli(argv: string[]): Promise<void> {
                         `[ocr] completed ${event.pageCount} pages\n`,
                       );
                       break;
+                    case "ocr-retry":
+                      process.stderr.write(
+                        `\n[ocr] retry ${event.attempt}/${event.maxRetries}: ${event.verifiedPages}/${event.totalPages} pages verified\n`,
+                      );
+                      break;
                     case "timeout":
                       process.stderr.write(
                         `[ocr] timeout after ${event.elapsedMs}ms / ${event.timeoutMs}ms\n`,

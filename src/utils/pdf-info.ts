@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { inflateSync } from "node:zlib";
-import type { IPdfInfoExtractor, IPdfAnalyzer, PdfMetadata, PdfAnalysis, PdfKind, OcrVerificationResult } from "../types/index.js";
+import type { IPdfInfoExtractor, IPdfAnalyzer, PdfMetadata, PdfAnalysis, PdfKind, OcrVerificationResult, PageVerificationStatus } from "../types/index.js";
 
 const MAX_DECOMPRESSED_STREAM_SIZE = 1024 * 1024;
 
@@ -173,28 +173,59 @@ function classifyPdfKind(
   return "blank";
 }
 
+
+const TEXT_OPERATOR_RE = /(?:^|[\s\[\]])(?:BT|Tj|TJ|Td|TD|T\*|'|")/;
+const XOBJECT_DO_RE = /\/[A-Za-z0-9_.:-]+\s+Do\b/;
+const INLINE_IMAGE_RE = /(?:^|\s)BI\s+[\s\S]*?\sID\s+[\s\S]*?\sEI(?:\s|$)/;
+
+function hasTextOperators(content: string): boolean {
+  return TEXT_OPERATOR_RE.test(content);
+}
+
+function hasImageOperators(content: string): boolean {
+  return XOBJECT_DO_RE.test(content) || INLINE_IMAGE_RE.test(content);
+}
+
+function isBlankLikeContent(content: string): boolean {
+  const trimmed = content.trim();
+  if (trimmed.length === 0) return true;
+  const withoutGraphicsState = trimmed.replace(/\b[qQ]\b/g, "").trim();
+  return withoutGraphicsState.length === 0;
+}
+
+function classifyPageContent(contents: Array<string | null>): PageVerificationStatus {
+  if (contents.length === 0) return "blank";
+  if (contents.some((c) => c !== null && hasTextOperators(c))) return "text";
+  const resolved = contents.filter((c): c is string => c !== null);
+  if (resolved.length === 0) return "unresolved";
+  if (resolved.every((c) => isBlankLikeContent(c))) {
+    return contents.length === resolved.length ? "blank" : "unresolved";
+  }
+  return resolved.some((c) => hasImageOperators(c)) ? "image_without_text" : "image_without_text";
+}
+
 export function verifyPerPageText(buffer: Buffer): OcrVerificationResult {
   const text = buffer.toString("latin1");
 
   if (buffer.length === 0 || !text.startsWith("%PDF-")) {
-    return { totalPages: 0, ocrTargetPages: 0, verifiedPages: 0 };
+    return { totalPages: 0, ocrTargetPages: 0, verifiedPages: 0, pageStatuses: [] };
   }
 
   const totalPages = extractPageCount(buffer);
   const pageRefs = collectPageContentRefs(text, buffer, totalPages);
   let verifiedPages = 0;
+  const pageStatuses: PageVerificationStatus[] = [];
 
   for (const refs of pageRefs) {
-    for (const [objNum, genNum] of refs) {
-      const content = resolveStreamText(text, buffer, objNum, genNum);
-      if (content !== null && /\b(?:Tj|TJ)\b/.test(content)) {
-        verifiedPages++;
-        break;
-      }
+    const resolvedContents = refs.map(([objNum, genNum]) => resolveStreamText(text, buffer, objNum, genNum));
+    const status = classifyPageContent(resolvedContents);
+    pageStatuses.push(status);
+    if (status === "text" || status === "blank") {
+      verifiedPages++;
     }
   }
 
-  return { totalPages, ocrTargetPages: totalPages, verifiedPages };
+  return { totalPages, ocrTargetPages: totalPages, verifiedPages, pageStatuses };
 }
 
 function collectPageContentRefsFromText(text: string): [number, number][][] {
@@ -232,7 +263,10 @@ function collectPageContentRefsFromText(text: string): [number, number][][] {
     const singleMatch = region.match(/\/Contents\s+(\d+)\s+(\d+)\s+R/);
     if (singleMatch && singleMatch[1]) {
       result.push([[parseInt(singleMatch[1]!, 10), parseInt(singleMatch[2]!, 10)]]);
+      continue;
     }
+
+    result.push([]);
   }
 
   return result;
