@@ -600,7 +600,7 @@ describe("verifyPerPageText", () => {
       "BT /F1 12 Tf 100 700 Td (World) Tj ET",
     ]);
     const result = verifyPerPageText(buf);
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       totalPages: 2,
       ocrTargetPages: 2,
       verifiedPages: 2,
@@ -613,7 +613,7 @@ describe("verifyPerPageText", () => {
       "50 50 m 100 100 l S",
     ]);
     const result = verifyPerPageText(buf);
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       totalPages: 2,
       ocrTargetPages: 2,
       verifiedPages: 0,
@@ -627,7 +627,7 @@ describe("verifyPerPageText", () => {
       "BT /F1 12 Tf 100 700 Td (World) Tj ET",
     ]);
     const result = verifyPerPageText(buf);
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       totalPages: 3,
       ocrTargetPages: 3,
       verifiedPages: 2,
@@ -636,7 +636,7 @@ describe("verifyPerPageText", () => {
 
   it("returns zeros for empty buffer", () => {
     const result = verifyPerPageText(Buffer.alloc(0));
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       totalPages: 0,
       ocrTargetPages: 0,
       verifiedPages: 0,
@@ -645,7 +645,7 @@ describe("verifyPerPageText", () => {
 
   it("returns zeros for non-PDF buffer", () => {
     const result = verifyPerPageText(Buffer.from("not a pdf"));
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       totalPages: 0,
       ocrTargetPages: 0,
       verifiedPages: 0,
@@ -655,17 +655,17 @@ describe("verifyPerPageText", () => {
   it("handles pages without /Contents entry", () => {
     const buf = makeContentPdf([null, null]);
     const result = verifyPerPageText(buf);
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       totalPages: 2,
       ocrTargetPages: 2,
-      verifiedPages: 0,
+      verifiedPages: 2,
     });
   });
 
   it("handles single-page PDF with text", () => {
     const buf = makeContentPdf(["BT /F1 12 Tf 100 700 Td (Hello) Tj ET"]);
     const result = verifyPerPageText(buf);
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       totalPages: 1,
       ocrTargetPages: 1,
       verifiedPages: 1,
@@ -679,10 +679,10 @@ describe("verifyPerPageText", () => {
       "100 100 200 200 re S",
     ]);
     const result = verifyPerPageText(buf);
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       totalPages: 3,
       ocrTargetPages: 3,
-      verifiedPages: 1,
+      verifiedPages: 2,
     });
   });
 
@@ -694,7 +694,7 @@ describe("verifyPerPageText", () => {
     const pdfBytes = await doc.save();
 
     const result = verifyPerPageText(Buffer.from(pdfBytes));
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       totalPages: 1,
       ocrTargetPages: 1,
       verifiedPages: 1,
@@ -731,7 +731,7 @@ describe("verifyPerPageText", () => {
     lines.push(`trailer\n<< /Size ${totalObjs} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF\n`);
 
     const result = verifyPerPageText(Buffer.from(lines.join(""), "latin1"));
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       totalPages: 1,
       ocrTargetPages: 1,
       verifiedPages: 1,
@@ -770,7 +770,7 @@ describe("verifyPerPageText", () => {
     lines.push(`trailer\n<< /Size ${totalObjs} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF\n`);
 
     const result = verifyPerPageText(Buffer.from(lines.join(""), "latin1"));
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       totalPages: 1,
       ocrTargetPages: 1,
       verifiedPages: 1,
@@ -813,7 +813,7 @@ describe("verifyPerPageText", () => {
 
     const buf = Buffer.from(lines.join(""), "latin1");
     const result = verifyPerPageText(buf);
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       totalPages: 1,
       ocrTargetPages: 1,
       verifiedPages: 0,
@@ -916,7 +916,7 @@ describe("verifyPerPageText", () => {
     lines.push("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n" + xrefStart + "\n%%EOF\n");
 
     const result = verifyPerPageText(Buffer.from(lines.join(""), "latin1"));
-    expect(result.verifiedPages).toBe(2);
+    expect(result.verifiedPages).toBe(4);
   });
 
   it("detects text in Chrome OCR output with nested Resources and /Type/Page at end", () => {
@@ -953,7 +953,7 @@ describe("verifyPerPageText", () => {
     lines.push(`trailer\n<< /Size ${totalObjs} /Root 2 0 R >>\nstartxref\n${xrefStart}\n%%EOF\n`);
 
     const result = verifyPerPageText(Buffer.from(lines.join(""), "latin1"));
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       totalPages: 1,
       ocrTargetPages: 1,
       verifiedPages: 1,
@@ -997,10 +997,60 @@ describe("verifyPerPageText", () => {
     lines.push(`trailer\n<< /Size ${totalObjs} /Root 2 0 R >>\nstartxref\n${xrefStart}\n%%EOF\n`);
 
     const result = verifyPerPageText(Buffer.from(lines.join(""), "latin1"));
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       totalPages: 2,
       ocrTargetPages: 2,
       verifiedPages: 2,
     });
+  });
+
+  it("classifies blank page (empty content) as verified", () => {
+    const buf = makeContentPdf([""]);
+    const result = verifyPerPageText(buf);
+    expect(result.verifiedPages).toBe(1);
+  });
+
+  it("classifies blank page (whitespace only) as verified", () => {
+    const buf = makeContentPdf(["   \n\t  "]);
+    const result = verifyPerPageText(buf);
+    expect(result.verifiedPages).toBe(1);
+  });
+
+  it("classifies blank page (q Q only) as verified", () => {
+    const buf = makeContentPdf(["q Q"]);
+    const result = verifyPerPageText(buf);
+    expect(result.verifiedPages).toBe(1);
+  });
+
+  it("classifies image-only page with Do operator as NOT verified", () => {
+    const buf = makeContentPdf(["q /Im0 Do Q"]);
+    const result = verifyPerPageText(buf);
+    expect(result.verifiedPages).toBe(0);
+  });
+
+  it("classifies image page with OCR text as verified", () => {
+    const buf = makeContentPdf(["q /Im0 Do Q\nBT /F1 12 Tf (Hello) Tj ET"]);
+    const result = verifyPerPageText(buf);
+    expect(result.verifiedPages).toBe(1);
+  });
+
+  it("classifies mixed pages (text, blank, image) correctly", () => {
+    const buf = makeContentPdf([
+      "BT /F1 12 Tf (Hello) Tj ET",
+      "",
+      "q /Im0 Do Q",
+    ]);
+    const result = verifyPerPageText(buf);
+    expect(result).toMatchObject({
+      totalPages: 3,
+      ocrTargetPages: 3,
+      verifiedPages: 2,
+    });
+  });
+
+  it("classifies vector-drawing page (re S) as NOT verified", () => {
+    const buf = makeContentPdf(["100 100 200 200 re S"]);
+    const result = verifyPerPageText(buf);
+    expect(result.verifiedPages).toBe(0);
   });
 });

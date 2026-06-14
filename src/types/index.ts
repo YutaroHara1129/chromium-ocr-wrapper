@@ -4,7 +4,8 @@ export type OcrProgressEvent =
   | { type: "document-completed"; pageCount: number; elapsedMs: number }
   | { type: "timeout"; timeoutMs: number; elapsedMs: number }
   | { type: "page-scrolled"; pageIndex: number; pageCount: number }
-  | { type: "ocr-waiting"; pageCount: number; waitMs: number };
+  | { type: "ocr-waiting"; pageCount: number; waitMs: number }
+  | { type: "ocr-retry"; attempt: number; maxRetries: number; verifiedPages: number; totalPages: number };
 
 export type OcrProgressCallback = (event: OcrProgressEvent) => void;
 
@@ -12,7 +13,10 @@ export type OcrVerificationResult = {
   totalPages: number;
   ocrTargetPages: number;
   verifiedPages: number;
+  pageStatuses?: PageVerificationStatus[];
 };
+
+export type PageVerificationStatus = "text" | "blank" | "image_without_text" | "unresolved";
 
 export interface PdfMetadata {
   pageCount: number;
@@ -52,6 +56,8 @@ export interface SearchifyToFileOptions {
   saveTimeoutMs?: number;
   uploadTimeoutMs?: number;
   ocrTimeoutMs?: number;
+  maxRetries?: number;
+  chunkSize?: number;
   onOcrProgress?: OcrProgressCallback;
 }
 

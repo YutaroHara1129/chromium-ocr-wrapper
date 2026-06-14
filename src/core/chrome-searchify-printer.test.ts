@@ -362,6 +362,7 @@ describe("ChromeSearchifyPrinter", () => {
     mockProfile();
     mockFetchHealthy();
     mockUploadServer();
+    vi.mocked(verifyPerPageText).mockReturnValue(DEFAULT_VERIFICATION);
 
     const platformChromePaths: Record<string, string[]> = {
       darwin: [
@@ -439,6 +440,7 @@ describe("ChromeSearchifyPrinter", () => {
 
     mockProfile();
     mockUploadServer();
+    vi.mocked(verifyPerPageText).mockReturnValue(DEFAULT_VERIFICATION);
     const chromeProcess = createChromeProcess();
     vi.mocked(spawn).mockReturnValue(chromeProcess as never);
 
@@ -596,6 +598,7 @@ describe("ChromeSearchifyPrinter", () => {
 
     mockProfile();
     mockUploadServer();
+    vi.mocked(verifyPerPageText).mockReturnValue(DEFAULT_VERIFICATION);
     vi.mocked(rm).mockRejectedValue(new Error("rm failed"));
     mockFetchHealthy();
 
@@ -781,6 +784,7 @@ describe("ChromeSearchifyPrinter", () => {
 
     mockProfile();
     mockFetchHealthy();
+    vi.mocked(verifyPerPageText).mockReturnValue(DEFAULT_VERIFICATION);
     vi.mocked(createUploadServer).mockResolvedValue({
       url: "http://127.0.0.1:54321/upload?token=test-token",
       done: Promise.resolve(1234),
@@ -800,7 +804,7 @@ describe("ChromeSearchifyPrinter", () => {
     ).rejects.toThrow("upload server close failed");
 
     expect(uploadServerClose).toHaveBeenCalled();
-    expect(rename).toHaveBeenCalledTimes(1);
+    expect(rename).not.toHaveBeenCalled();
   });
 
   it("throws when upload succeeds but output file is empty", async () => {
@@ -884,6 +888,7 @@ describe("ChromeSearchifyPrinter", () => {
     mockProfile();
     mockUploadServer();
     mockFetchHealthy();
+    vi.mocked(verifyPerPageText).mockReturnValue(DEFAULT_VERIFICATION);
 
     const chromeProcess = createChromeProcess();
     vi.mocked(spawn).mockReturnValue(chromeProcess as never);
@@ -942,7 +947,7 @@ describe("ChromeSearchifyPrinter", () => {
     const customVerification: OcrVerificationResult = {
       totalPages: 5,
       ocrTargetPages: 4,
-      verifiedPages: 3,
+      verifiedPages: 4,
     };
     mockSearchifyRuntime({ chromePath: "/custom/chrome", verification: customVerification });
 
@@ -1140,7 +1145,7 @@ describe("ChromeSearchifyPrinter", () => {
       });
 
       expect(onOcrProgress).toHaveBeenCalledWith(
-        expect.objectContaining({ type: "ocr-waiting", pageCount: 3, waitMs: 300 }),
+        expect.objectContaining({ type: "ocr-waiting", pageCount: 3, waitMs: 900 }),
       );
     });
 
@@ -1153,6 +1158,95 @@ describe("ChromeSearchifyPrinter", () => {
       });
 
       expect(frame.scrolledPages).toEqual([0, 1, 2, 3, 4]);
+    });
+  });
+
+  describe("OCR retry loop", () => {
+    const PARTIAL_VERIFICATION: OcrVerificationResult = {
+      totalPages: 3,
+      ocrTargetPages: 3,
+      verifiedPages: 1,
+    };
+
+    it("retries save when first verification is partial", async () => {
+      mockSearchifyRuntime({ chromePath: "/custom/chrome" });
+      vi.mocked(verifyPerPageText)
+        .mockReturnValueOnce(PARTIAL_VERIFICATION)
+        .mockReturnValueOnce(DEFAULT_VERIFICATION);
+
+      const result = await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+        chromePath: "/custom/chrome",
+      });
+
+      expect(result).toEqual(DEFAULT_VERIFICATION);
+      expect(vi.mocked(verifyPerPageText)).toHaveBeenCalledTimes(2);
+    });
+
+    it("does not retry when all pages verified on first attempt", async () => {
+      mockSearchifyRuntime({ chromePath: "/custom/chrome" });
+
+      await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+        chromePath: "/custom/chrome",
+      });
+
+      expect(vi.mocked(verifyPerPageText)).toHaveBeenCalledTimes(1);
+    });
+
+    it("respects maxRetries option", async () => {
+      mockSearchifyRuntime({ chromePath: "/custom/chrome" });
+      vi.mocked(verifyPerPageText).mockReturnValue(PARTIAL_VERIFICATION);
+
+      await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+        chromePath: "/custom/chrome",
+        maxRetries: 2,
+      });
+
+      expect(vi.mocked(verifyPerPageText)).toHaveBeenCalledTimes(3);
+    }, 30_000);
+
+    it("default maxRetries is 5", async () => {
+      mockSearchifyRuntime({ chromePath: "/custom/chrome" });
+      vi.mocked(verifyPerPageText).mockReturnValue(PARTIAL_VERIFICATION);
+
+      await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+        chromePath: "/custom/chrome",
+      });
+
+      expect(vi.mocked(verifyPerPageText)).toHaveBeenCalledTimes(6);
+    }, 30_000);
+
+    it("emits ocr-retry progress event before retry scroll", async () => {
+      const onOcrProgress = vi.fn();
+      mockSearchifyRuntime({ chromePath: "/custom/chrome" });
+      vi.mocked(verifyPerPageText)
+        .mockReturnValueOnce(PARTIAL_VERIFICATION)
+        .mockReturnValueOnce(DEFAULT_VERIFICATION);
+
+      await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+        chromePath: "/custom/chrome",
+        onOcrProgress,
+      });
+
+      expect(onOcrProgress).toHaveBeenCalledWith({
+        type: "ocr-retry",
+        attempt: 1,
+        maxRetries: 5,
+        verifiedPages: 1,
+        totalPages: 3,
+      });
+    });
+
+    it("page is closed after retry loop", async () => {
+      const { page } = mockSearchifyRuntime({ chromePath: "/custom/chrome" });
+      vi.mocked(verifyPerPageText)
+        .mockReturnValueOnce(PARTIAL_VERIFICATION)
+        .mockReturnValueOnce(DEFAULT_VERIFICATION);
+
+      await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+        chromePath: "/custom/chrome",
+      });
+
+      expect(page.close).toHaveBeenCalledTimes(1);
     });
   });
 });
