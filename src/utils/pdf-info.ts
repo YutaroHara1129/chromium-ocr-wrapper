@@ -174,7 +174,7 @@ function classifyPdfKind(
 }
 
 
-const TEXT_OPERATOR_RE = /(?:^|[\s\[\]])(?:BT|Tj|TJ|Td|TD|T\*|'|")/;
+const TEXT_OPERATOR_RE = /(?:^|[\s\[\]])(?:BT|Tj|TJ|'|")/;
 const XOBJECT_DO_RE = /\/[A-Za-z0-9_.:-]+\s+Do\b/;
 const INLINE_IMAGE_RE = /(?:^|\s)BI\s+[\s\S]*?\sID\s+[\s\S]*?\sEI(?:\s|$)/;
 
@@ -223,6 +223,12 @@ export function verifyPerPageText(buffer: Buffer): OcrVerificationResult {
     if (status === "text" || status === "blank") {
       verifiedPages++;
     }
+  }
+
+  // Pad missing page statuses as "unresolved" so downstream retry/rescue
+  // logic includes pages whose content refs could not be collected.
+  while (pageStatuses.length < totalPages) {
+    pageStatuses.push("unresolved");
   }
 
   return { totalPages, ocrTargetPages: totalPages, verifiedPages, pageStatuses };

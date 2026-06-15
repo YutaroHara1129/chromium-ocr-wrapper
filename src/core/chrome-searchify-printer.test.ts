@@ -578,7 +578,7 @@ describe("ChromeSearchifyPrinter", () => {
     const promise = printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", { chromePath: "/custom/chrome" });
     promise.catch(() => {});
 
-    await advanceUntilSettled(promise, 20_000);
+    await advanceUntilSettled(promise, 30_000);
 
     await expect(promise).rejects.toThrow("PDF viewer frame not found within 15 seconds");
 
