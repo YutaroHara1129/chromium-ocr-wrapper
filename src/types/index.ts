@@ -14,6 +14,7 @@ export type OcrVerificationResult = {
   ocrTargetPages: number;
   verifiedPages: number;
   pageStatuses?: PageVerificationStatus[];
+  failedPageIndices?: number[];
 };
 
 export type PageVerificationStatus = "text" | "blank" | "image_without_text" | "unresolved";
@@ -56,6 +57,10 @@ export interface SearchifyToFileOptions {
   saveTimeoutMs?: number;
   uploadTimeoutMs?: number;
   ocrTimeoutMs?: number;
+  /**
+   * Compatibility option for the temporal re-scroll retry.
+   * 0 disables it; any positive value is capped at one retry before local rescue.
+   */
   maxRetries?: number;
   chunkSize?: number;
   onOcrProgress?: OcrProgressCallback;
