@@ -217,12 +217,12 @@ describe("runCli", () => {
 
     await runCli(["node", "cli.js", "/docs/input.pdf"]);
 
-    expect(glob).toHaveBeenCalledWith("/docs/input.pdf", {
-      absolute: true,
-      nodir: true,
-      dot: true,
-    });
-    expect(ChromeSearchifyPrinter).toHaveBeenCalledTimes(1);
+   expect(glob).toHaveBeenCalledWith("/docs/input.pdf", {
+     absolute: true,
+     nodir: true,
+      dot: false,
+   });
+   expect(ChromeSearchifyPrinter).toHaveBeenCalledTimes(1);
     expect(ConversionPipeline).toHaveBeenCalledTimes(1);
     expect(mocks.pipelineInstances[0].convert).toHaveBeenCalledWith({
       inputPath: "/docs/input.pdf",
@@ -653,13 +653,13 @@ describe("runCli", () => {
         throw new Error("ENOENT");
       });
 
-     await runCli(["node", "cli.js", "--output", "/out", "docs/**/*.pdf"]);
+    await runCli(["node", "cli.js", "--output", "/out", "docs/**/*.pdf"]);
 
-     expect(glob).toHaveBeenCalledWith(inputPattern, {
-       absolute: true,
-        nodir: true,
-        dot: true,
-     });
+    expect(glob).toHaveBeenCalledWith(inputPattern, {
+      absolute: true,
+       nodir: true,
+        dot: false,
+    });
       expect(mocks.pipelineInstances[0].convert).toHaveBeenCalledWith(
         expect.objectContaining({
           inputPath: `${cwd}/docs/sub/nested.pdf`,
@@ -684,13 +684,13 @@ describe("runCli", () => {
         throw new Error("ENOENT");
       });
 
-     await runCli(["node", "cli.js", "--output", "/out", "docs/2024/*.pdf"]);
+    await runCli(["node", "cli.js", "--output", "/out", "docs/2024/*.pdf"]);
 
-     expect(glob).toHaveBeenCalledWith(inputPattern, {
-       absolute: true,
-        nodir: true,
-        dot: true,
-     });
+    expect(glob).toHaveBeenCalledWith(inputPattern, {
+      absolute: true,
+       nodir: true,
+        dot: false,
+    });
       expect(mocks.pipelineInstances[0].convert).toHaveBeenCalledWith(
         expect.objectContaining({
           inputPath: `${cwd}/docs/2024/report.pdf`,
@@ -715,13 +715,13 @@ describe("runCli", () => {
         throw new Error("ENOENT");
       });
 
-     await runCli(["node", "cli.js", "--output", "/out", "*.pdf"]);
+    await runCli(["node", "cli.js", "--output", "/out", "*.pdf"]);
 
-     expect(glob).toHaveBeenCalledWith(inputPattern, {
-       absolute: true,
-        nodir: true,
-        dot: true,
-     });
+    expect(glob).toHaveBeenCalledWith(inputPattern, {
+      absolute: true,
+       nodir: true,
+        dot: false,
+    });
       expect(mocks.pipelineInstances[0].convert).toHaveBeenCalledWith(
         expect.objectContaining({
           inputPath: `${cwd}/a.pdf`,

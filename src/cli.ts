@@ -201,10 +201,12 @@ async function resolveInputFiles(inputs: string[]): Promise<ResolvedFile[]> {
 
     let globPattern: string;
     let baseDir: string;
+    let dotOption = false;
 
     if (isDir) {
       globPattern = join(escape(absInput), "**/*.pdf");
       baseDir = absInput;
+      dotOption = true;
     } else if (isFile) {
       // Literal file: register directly so metacharacters in the path are
       // never interpreted as glob pattern syntax.
@@ -225,7 +227,7 @@ async function resolveInputFiles(inputs: string[]): Promise<ResolvedFile[]> {
     const matches = await glob(globPattern, {
       absolute: true,
       nodir: true,
-      dot: true,
+      dot: dotOption,
     });
 
     for (const match of matches) {
