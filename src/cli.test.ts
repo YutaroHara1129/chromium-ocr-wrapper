@@ -59,6 +59,7 @@ vi.mock("glob", () => ({
     if (typeof pattern !== "string") return false;
     return /[*?{}[\]]/.test(pattern);
   }),
+  escape: vi.fn((s: string) => s),
 }));
 
 vi.mock("node:fs", () => ({
@@ -216,11 +217,12 @@ describe("runCli", () => {
 
     await runCli(["node", "cli.js", "/docs/input.pdf"]);
 
-    expect(glob).toHaveBeenCalledWith("/docs/input.pdf", {
-      absolute: true,
-      nodir: true,
-    });
-    expect(ChromeSearchifyPrinter).toHaveBeenCalledTimes(1);
+   expect(glob).toHaveBeenCalledWith("/docs/input.pdf", {
+     absolute: true,
+     nodir: true,
+      dot: false,
+   });
+   expect(ChromeSearchifyPrinter).toHaveBeenCalledTimes(1);
     expect(ConversionPipeline).toHaveBeenCalledTimes(1);
     expect(mocks.pipelineInstances[0].convert).toHaveBeenCalledWith({
       inputPath: "/docs/input.pdf",
@@ -301,8 +303,10 @@ describe("runCli", () => {
 
   it("--output directory maps each input to _searchable suffixed file", async () => {
     mocks.globMock.mockResolvedValue(["/docs/a.pdf", "/docs/b.PDF"]);
-    mocks.statSyncMock.mockReturnValue({
-      isDirectory: () => true,
+    mocks.statSyncMock.mockImplementation((p: string) => {
+      if (p === "/output")
+        return { isDirectory: () => true } as ReturnType<typeof statSync>;
+      throw new Error("ENOENT");
     });
 
     await runCli(["node", "cli.js", "--output", "/output", "/docs/*.pdf"]);
@@ -649,12 +653,13 @@ describe("runCli", () => {
         throw new Error("ENOENT");
       });
 
-      await runCli(["node", "cli.js", "--output", "/out", "docs/**/*.pdf"]);
+    await runCli(["node", "cli.js", "--output", "/out", "docs/**/*.pdf"]);
 
-      expect(glob).toHaveBeenCalledWith(inputPattern, {
-        absolute: true,
-        nodir: true,
-      });
+    expect(glob).toHaveBeenCalledWith(inputPattern, {
+      absolute: true,
+       nodir: true,
+        dot: false,
+    });
       expect(mocks.pipelineInstances[0].convert).toHaveBeenCalledWith(
         expect.objectContaining({
           inputPath: `${cwd}/docs/sub/nested.pdf`,
@@ -679,12 +684,13 @@ describe("runCli", () => {
         throw new Error("ENOENT");
       });
 
-      await runCli(["node", "cli.js", "--output", "/out", "docs/2024/*.pdf"]);
+    await runCli(["node", "cli.js", "--output", "/out", "docs/2024/*.pdf"]);
 
-      expect(glob).toHaveBeenCalledWith(inputPattern, {
-        absolute: true,
-        nodir: true,
-      });
+    expect(glob).toHaveBeenCalledWith(inputPattern, {
+      absolute: true,
+       nodir: true,
+        dot: false,
+    });
       expect(mocks.pipelineInstances[0].convert).toHaveBeenCalledWith(
         expect.objectContaining({
           inputPath: `${cwd}/docs/2024/report.pdf`,
@@ -709,12 +715,13 @@ describe("runCli", () => {
         throw new Error("ENOENT");
       });
 
-      await runCli(["node", "cli.js", "--output", "/out", "*.pdf"]);
+    await runCli(["node", "cli.js", "--output", "/out", "*.pdf"]);
 
-      expect(glob).toHaveBeenCalledWith(inputPattern, {
-        absolute: true,
-        nodir: true,
-      });
+    expect(glob).toHaveBeenCalledWith(inputPattern, {
+      absolute: true,
+       nodir: true,
+        dot: false,
+    });
       expect(mocks.pipelineInstances[0].convert).toHaveBeenCalledWith(
         expect.objectContaining({
           inputPath: `${cwd}/a.pdf`,
@@ -824,6 +831,7 @@ describe("runCli", () => {
       expect(glob).toHaveBeenCalledWith("/mydir/**/*.pdf", {
         absolute: true,
         nodir: true,
+        dot: true,
       });
       expect(mocks.pipelineInstances[0].convert).toHaveBeenCalledTimes(2);
       expect(mocks.pipelineInstances[0].convert).toHaveBeenNthCalledWith(

@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { glob, hasMagic } from "glob";
+import { glob, hasMagic, escape } from "glob";
 import { resolve, basename, extname, join, dirname, relative, isAbsolute } from "node:path";
 import globParent from "glob-parent";
 import { statSync } from "node:fs";
@@ -184,23 +184,42 @@ async function resolveInputFiles(inputs: string[]): Promise<ResolvedFile[]> {
 
   for (const input of inputs) {
     const absInput = resolve(input);
+    // Check existence as a literal path BEFORE consulting hasMagic(). This
+    // prevents file/dir names containing glob metacharacters (e.g.
+    // "[reports]/Q1.pdf") from being misread as glob patterns.
     let isDir = false;
-    const hasGlob = hasMagic(input, { magicalBraces: true });
-    if (!hasGlob) {
-      try {
-        isDir = statSync(absInput).isDirectory();
-      } catch {
-        // not a directory or doesn't exist
+    let isFile = false;
+    try {
+      const st = statSync(absInput);
+      isDir = st.isDirectory();
+      if (!isDir) {
+        isFile = st.isFile();
       }
+    } catch {
+      // not a literal path → treat as glob pattern below
     }
 
     let globPattern: string;
     let baseDir: string;
+    let dotOption = false;
 
     if (isDir) {
-      globPattern = join(absInput, "**/*.pdf");
+      globPattern = join(escape(absInput, { magicalBraces: true }), "**/*.pdf");
       baseDir = absInput;
+      dotOption = true;
+    } else if (isFile) {
+      // Literal file: register directly so metacharacters in the path are
+      // never interpreted as glob pattern syntax.
+      if (
+        absInput.toLowerCase().endsWith(".pdf") &&
+        !seen.has(absInput)
+      ) {
+        seen.add(absInput);
+        result.push({ absolutePath: absInput, baseDir: dirname(absInput) });
+      }
+      continue;
     } else {
+      const hasGlob = hasMagic(input, { magicalBraces: true });
       globPattern = absInput;
       baseDir = hasGlob ? resolve(globParent(absInput)) : dirname(absInput);
     }
@@ -208,6 +227,7 @@ async function resolveInputFiles(inputs: string[]): Promise<ResolvedFile[]> {
     const matches = await glob(globPattern, {
       absolute: true,
       nodir: true,
+      dot: dotOption,
     });
 
     for (const match of matches) {
