@@ -44,6 +44,7 @@ import type { OcrVerificationResult } from "../types/index.js";
 
 type MockViewerFrame = {
   evaluate: ReturnType<typeof vi.fn>;
+  scrolledPages: number[];
 };
 
 type MockPage = {
@@ -82,7 +83,7 @@ const DEFAULT_VERIFICATION: OcrVerificationResult = {
 
 function createSimulatedViewerFrame(
   options?: ViewerSimulationOptions,
-): MockViewerFrame {
+): MockViewerFrame & { scrolledPages: number[] } {
   const pageCount = options?.pageCount ?? 3;
   const ocrTriggeredAfterSetup = options?.ocrTriggeredAfterSetup ?? true;
 
@@ -96,7 +97,10 @@ function createSimulatedViewerFrame(
   const uploadMock =
     options?.uploadMock ?? vi.fn().mockResolvedValue({ ok: true } as Response);
 
-  const frame: MockViewerFrame = {
+  const scrolledPages: number[] = [];
+
+  const frame: MockViewerFrame & { scrolledPages: number[] } = {
+    scrolledPages,
     evaluate: vi.fn().mockImplementation(async (fn: unknown, params?: unknown) => {
       if (typeof fn !== "function") return undefined;
 
@@ -121,6 +125,33 @@ function createSimulatedViewerFrame(
       }
 
       const fnString = fn.toString();
+
+      if (
+        fnString.includes("__searchifyProgress") &&
+        fnString.includes("handlePluginMessage_") &&
+        fnString.includes("pageCount") &&
+        !fnString.includes("goToPage")
+      ) {
+        return { pageCount };
+      }
+
+      if (
+        fnString.includes("goToPage") &&
+        fnString.includes("viewport_") &&
+        !fnString.includes("__searchifyProgress")
+      ) {
+        const pageIndex = params as number;
+        scrolledPages.push(pageIndex);
+        return undefined;
+      }
+
+      if (
+        fnString.includes("__searchifyProgress") &&
+        fnString.includes("ocrTriggered") &&
+        !fnString.includes("handlePluginMessage_")
+      ) {
+        return { ocrTriggered: ocrTriggeredAfterSetup };
+      }
 
       if (fnString.includes("viewer") && fnString.includes("currentController") && !fnString.includes("__searchifyProgress")) {
         return true;
@@ -1024,7 +1055,6 @@ describe("ChromeSearchifyPrinter", () => {
       });
 
       expect(result).toEqual(DEFAULT_VERIFICATION);
-      expect(onOcrProgress).toHaveBeenCalledTimes(1);
       expect(onOcrProgress).toHaveBeenCalledWith(
         expect.objectContaining({ type: "document-completed", pageCount: 3, elapsedMs: expect.any(Number) }),
       );
@@ -1078,6 +1108,51 @@ describe("ChromeSearchifyPrinter", () => {
           onOcrProgress,
         }),
       ).rejects.toThrow("callback exploded");
+    });
+
+    it("emits page-scrolled for each page in order", async () => {
+      const onOcrProgress = vi.fn();
+      mockSearchifyRuntime({ chromePath: "/custom/chrome" });
+
+      await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+        chromePath: "/custom/chrome",
+        onOcrProgress,
+      });
+
+      const scrollEvents = onOcrProgress.mock.calls
+        .map((call) => call[0])
+        .filter((e) => e.type === "page-scrolled");
+
+      expect(scrollEvents).toEqual([
+        { type: "page-scrolled", pageIndex: 0, pageCount: 3 },
+        { type: "page-scrolled", pageIndex: 1, pageCount: 3 },
+        { type: "page-scrolled", pageIndex: 2, pageCount: 3 },
+      ]);
+    });
+
+    it("emits ocr-waiting before post-scroll buffer", async () => {
+      const onOcrProgress = vi.fn();
+      mockSearchifyRuntime({ chromePath: "/custom/chrome" });
+
+      await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+        chromePath: "/custom/chrome",
+        onOcrProgress,
+      });
+
+      expect(onOcrProgress).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "ocr-waiting", pageCount: 3, waitMs: 300 }),
+      );
+    });
+
+    it("scrolls all pages in order via evaluate", async () => {
+      const frame = createSimulatedViewerFrame({ pageCount: 5 });
+      mockSearchifyRuntime({ chromePath: "/custom/chrome", viewerFrame: frame });
+
+      await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+        chromePath: "/custom/chrome",
+      });
+
+      expect(frame.scrolledPages).toEqual([0, 1, 2, 3, 4]);
     });
   });
 });

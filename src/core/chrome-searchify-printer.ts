@@ -324,18 +324,17 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
 
     const setupResult = await viewerFrame.evaluate(
       /* v8 ignore start -- browser-side callback; not executed in Node.js unit tests */
-      async (): Promise<{
+      (): Promise<{
         pageCount: number;
-        ocrTriggered: boolean;
       }> => {
       const g = globalThis as Record<string, unknown>;
       const viewer = g["viewer"] as Record<string, unknown> | undefined;
       if (!viewer)
-        return { pageCount: 0, ocrTriggered: false };
+        return Promise.resolve({ pageCount: 0 });
 
       const ctrl = viewer["currentController"] as Record<string, unknown> | undefined;
       if (!ctrl)
-        return { pageCount: 0, ocrTriggered: false };
+        return Promise.resolve({ pageCount: 0 });
 
       const progress: Record<string, boolean> = { ocrTriggered: false };
       g["__searchifyProgress"] = progress;
@@ -366,29 +365,59 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
       const pageCount =
         docLength || docDimsPagesNoUnder || docDimsPages || viewportPages || 0;
 
-      if (viewport && typeof viewport["goToPage"] === "function") {
-        for (let i = 0; i < pageCount; i++) {
-          (viewport["goToPage"] as Function).call(viewport, i);
-          await new Promise((r) => setTimeout(r, 300));
-        }
-      }
-
-      await new Promise((r) => setTimeout(r, pageCount * 100));
-
-      return { pageCount, ocrTriggered: progress["ocrTriggered"] ?? false };
+      return Promise.resolve({ pageCount });
     });
     /* v8 ignore end */
 
-    const { pageCount, ocrTriggered } = setupResult;
+    const { pageCount } = setupResult;
+
+    if (pageCount === 0) {
+      throw new Error("PDF has no pages to process");
+    }
+
+    for (let i = 0; i < pageCount; i++) {
+      await viewerFrame.evaluate(
+        /* v8 ignore start -- browser-side callback; not executed in Node.js unit tests */
+        (pageIndex: number) => {
+          const g = globalThis as Record<string, unknown>;
+          const viewer = g["viewer"] as Record<string, unknown> | undefined;
+          if (!viewer) return;
+          const viewport = viewer["viewport_"] as Record<string, unknown> | undefined;
+          if (viewport && typeof viewport["goToPage"] === "function") {
+            (viewport["goToPage"] as Function).call(viewport, pageIndex);
+          }
+        },
+        /* v8 ignore end */
+        i,
+      );
+
+      onOcrProgress?.({ type: "page-scrolled", pageIndex: i, pageCount });
+
+      await new Promise((r) => setTimeout(r, 300));
+    }
+
+    const waitMs = pageCount * 100;
+
+    onOcrProgress?.({ type: "ocr-waiting", pageCount, waitMs });
+
+    await new Promise((r) => setTimeout(r, waitMs));
+
+    const statusResult = await viewerFrame.evaluate(
+      /* v8 ignore start -- browser-side callback; not executed in Node.js unit tests */
+      (): { ocrTriggered: boolean } => {
+        const g = globalThis as Record<string, unknown>;
+        const progress = g["__searchifyProgress"] as Record<string, boolean> | undefined;
+        return { ocrTriggered: progress?.["ocrTriggered"] ?? false };
+      },
+      /* v8 ignore end */
+    );
+
+    const { ocrTriggered } = statusResult;
 
     if (verbose) {
       console.error(
         `[ChromeSearchifyPrinter] Pages: ${pageCount}, ocrTriggered: ${ocrTriggered}`,
       );
-    }
-
-    if (pageCount === 0) {
-      throw new Error("PDF has no pages to process");
     }
 
     if (onOcrProgress) {

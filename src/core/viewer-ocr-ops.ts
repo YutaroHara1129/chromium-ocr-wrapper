@@ -49,11 +49,13 @@ export function setupProgressInterceptor(
 export async function scrollAllPages(
   viewer: ViewerLike,
   pageCount: number,
+  onPageScrolled?: (pageIndex: number, pageCount: number) => void,
 ): Promise<void> {
   const vp = viewer.viewport_;
   if (!vp || typeof vp.goToPage !== "function") return;
   for (let i = 0; i < pageCount; i++) {
     vp.goToPage(i);
+    onPageScrolled?.(i, pageCount);
     await new Promise((r) => setTimeout(r, 300));
   }
 }

@@ -819,4 +819,188 @@ describe("verifyPerPageText", () => {
       verifiedPages: 0,
     });
   });
+
+  it("detects text with Tj operator without BT block", () => {
+    const buf = makeContentPdf(["/F1 12 Tf (Hello) Tj"]);
+    const result = verifyPerPageText(buf);
+    expect(result.verifiedPages).toBe(1);
+  });
+
+  it("detects text with TJ array operator without BT block", () => {
+    const buf = makeContentPdf(["[(Hello) 120 (World)] TJ"]);
+    const result = verifyPerPageText(buf);
+    expect(result.verifiedPages).toBe(1);
+  });
+
+  it("does not verify page with only Td positioning operator (no text shown)", () => {
+    const buf = makeContentPdf(["100 700 Td"]);
+    const result = verifyPerPageText(buf);
+    expect(result.verifiedPages).toBe(0);
+  });
+
+  it("resolves object with non-zero generation number", () => {
+    const lines: string[] = ["%PDF-1.4"];
+    let offset = lines[0]!.length + 1;
+    const objectPositions: number[] = [];
+
+    const obj = (num: number, content: string): void => {
+      objectPositions.push(offset);
+      const text = `${num} 0 obj\n${content}\nendobj\n`;
+      lines.push(text);
+      offset += text.length;
+    };
+
+    obj(2, `<< /Type /Pages /Kids [3 0 R] /Count 1 >>`);
+    obj(1, `<< /Type /Catalog /Pages 2 0 R >>`);
+    obj(3, `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R>>`);
+    const content = "BT /F1 12 Tf (Hello) Tj ET";
+    obj(4, `<< /Length ${content.length} >>\nstream\n${content}\nendstream`);
+
+    const xrefStart = offset;
+    const totalObjs = 5;
+    lines.push("xref\n");
+    lines.push(`0 ${totalObjs}\n`);
+    lines.push("0000000000 65535 f \n");
+    for (const pos of objectPositions) {
+      lines.push(`${String(pos).padStart(10, "0")} 00000 n \n`);
+    }
+    lines.push(`trailer\n<< /Size ${totalObjs} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF\n`);
+
+    const result = verifyPerPageText(Buffer.from(lines.join(""), "latin1"));
+    expect(result.verifiedPages).toBe(1);
+  });
+
+  it("falls through to stream search when raw refs count mismatches page count", () => {
+    const streamContent = "BT /F1 12 Tf (Hello) Tj ET";
+    const compressed = deflateSync(Buffer.from(streamContent, "latin1"));
+
+    const lines: string[] = ["%PDF-1.4"];
+    let offset = lines[0]!.length + 1;
+    const objectPositions: number[] = [];
+
+    const obj = (num: number, content: string): void => {
+      objectPositions.push(offset);
+      const text = `${num} 0 obj\n${content}\nendobj\n`;
+      lines.push(text);
+      offset += text.length;
+    };
+
+    obj(2, `<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>`);
+    obj(1, `<< /Type /Catalog /Pages 2 0 R >>`);
+    obj(3, `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]>>`);
+    obj(4, `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]>>`);
+
+    const streamData = compressed.toString("latin1");
+    objectPositions.push(offset);
+    const pageRefsStream = `5 0 obj\n<< /Filter /FlateDecode /Length ${streamData.length} >>\nstream\n${streamData}\nendstream\n`;
+    lines.push(pageRefsStream);
+    offset += pageRefsStream.length;
+
+    objectPositions.push(offset);
+    const contentWithRefs = "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R>>\nendobj\n";
+    lines.push(contentWithRefs);
+    offset += contentWithRefs.length;
+
+    objectPositions.push(offset);
+    const contentWithRefs2 = "4 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R>>\nendobj\n";
+    lines.push(contentWithRefs2);
+    offset += contentWithRefs2.length;
+
+    const xrefStart = offset;
+    lines.push("xref\n");
+    lines.push("0 6\n");
+    lines.push("0000000000 65535 f \n");
+    for (const pos of objectPositions) {
+      lines.push(`${String(pos).padStart(10, "0")} 00000 n \n`);
+    }
+    lines.push("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n" + xrefStart + "\n%%EOF\n");
+
+    const result = verifyPerPageText(Buffer.from(lines.join(""), "latin1"));
+    expect(result.verifiedPages).toBe(2);
+  });
+
+  it("detects text in Chrome OCR output with nested Resources and /Type/Page at end", () => {
+    const lines: string[] = ["%PDF-1.4"];
+    let offset = lines[0]!.length + 1;
+    const objectPositions: number[] = [];
+
+    const obj = (num: number, content: string): void => {
+      objectPositions.push(offset);
+      const text = `${num} 0 obj\n${content}\nendobj\n`;
+      lines.push(text);
+      offset += text.length;
+    };
+
+    obj(1, `<</Count 1/Kids[ 5 0 R ]/Type/Pages>>`);
+    obj(2, `<</Pages 1 0 R /Type/Catalog>>`);
+    obj(4, `<</BitsPerComponent 8/ColorSpace/DeviceRGB/Height 200/Length 100/Subtype/Image/Type/XObject/Width 200>>\nstream\n${"x".repeat(100)}\nendstream`);
+    const content1 = "q Q";
+    obj(6, `<</Length ${content1.length}>>\nstream\n${content1}\nendstream`);
+    const content2 = "BT /FXF1 12 Tf (SCAN) Tj ET";
+    obj(18, `<</Length ${content2.length}>>\nstream\n${content2}\nendstream`);
+    obj(9, `<</BaseFont/Untitled/Subtype/Type0/Type/Font>>`);
+    obj(17, `<</BM/Normal/CA 1/ca 1>>`);
+    obj(5, `<</Annots[]/Contents[ 6 0 R  18 0 R ]/MediaBox[ 0 0 595.28 841.89]/Parent 1 0 R /Resources<</ExtGState<</FXE1 17 0 R >>/Font<</FXF1 9 0 R >>/XObject<</Image-7098480789 4 0 R >>>>/Type/Page>>`);
+
+    const xrefStart = offset;
+    const totalObjs = 10;
+    lines.push("xref\n");
+    lines.push(`0 ${totalObjs}\n`);
+    lines.push("0000000000 65535 f \n");
+    for (const pos of objectPositions) {
+      lines.push(`${String(pos).padStart(10, "0")} 00000 n \n`);
+    }
+    lines.push(`trailer\n<< /Size ${totalObjs} /Root 2 0 R >>\nstartxref\n${xrefStart}\n%%EOF\n`);
+
+    const result = verifyPerPageText(Buffer.from(lines.join(""), "latin1"));
+    expect(result).toEqual({
+      totalPages: 1,
+      ocrTargetPages: 1,
+      verifiedPages: 1,
+    });
+  });
+
+  it("detects text in multiple Chrome-style pages with nested Resources", () => {
+    const lines: string[] = ["%PDF-1.4"];
+    let offset = lines[0]!.length + 1;
+    const objectPositions: number[] = [];
+
+    const obj = (num: number, content: string): void => {
+      objectPositions.push(offset);
+      const text = `${num} 0 obj\n${content}\nendobj\n`;
+      lines.push(text);
+      offset += text.length;
+    };
+
+    obj(1, `<</Count 2/Kids[ 5 0 R  20 0 R ]/Type/Pages>>`);
+    obj(2, `<</Pages 1 0 R /Type/Catalog>>`);
+    obj(9, `<</BaseFont/Untitled/Subtype/Type0/Type/Font>>`);
+    const c1a = "q Q";
+    obj(6, `<</Length ${c1a.length}>>\nstream\n${c1a}\nendstream`);
+    const c1b = "BT /FXF1 12 Tf (Page1) Tj ET";
+    obj(18, `<</Length ${c1b.length}>>\nstream\n${c1b}\nendstream`);
+    const c2a = "q Q";
+    obj(21, `<</Length ${c2a.length}>>\nstream\n${c2a}\nendstream`);
+    const c2b = "BT /FXF1 12 Tf (Page2) Tj ET";
+    obj(22, `<</Length ${c2b.length}>>\nstream\n${c2b}\nendstream`);
+    obj(5, `<</Contents[ 6 0 R  18 0 R ]/MediaBox[ 0 0 595 842]/Parent 1 0 R /Resources<</Font<</FXF1 9 0 R >>>>/Type/Page>>`);
+    obj(20, `<</Contents[ 21 0 R  22 0 R ]/MediaBox[ 0 0 595 842]/Parent 1 0 R /Resources<</Font<</FXF1 9 0 R >>>>/Type/Page>>`);
+
+    const xrefStart = offset;
+    const totalObjs = 23;
+    lines.push("xref\n");
+    lines.push(`0 ${totalObjs}\n`);
+    lines.push("0000000000 65535 f \n");
+    for (const pos of objectPositions) {
+      lines.push(`${String(pos).padStart(10, "0")} 00000 n \n`);
+    }
+    lines.push(`trailer\n<< /Size ${totalObjs} /Root 2 0 R >>\nstartxref\n${xrefStart}\n%%EOF\n`);
+
+    const result = verifyPerPageText(Buffer.from(lines.join(""), "latin1"));
+    expect(result).toEqual({
+      totalPages: 2,
+      ocrTargetPages: 2,
+      verifiedPages: 2,
+    });
+  });
 });

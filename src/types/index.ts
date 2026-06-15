@@ -2,7 +2,9 @@ export type PdfKind = "text_only" | "blank" | "image_only" | "mixed" | "unknown"
 
 export type OcrProgressEvent =
   | { type: "document-completed"; pageCount: number; elapsedMs: number }
-  | { type: "timeout"; timeoutMs: number; elapsedMs: number };
+  | { type: "timeout"; timeoutMs: number; elapsedMs: number }
+  | { type: "page-scrolled"; pageIndex: number; pageCount: number }
+  | { type: "ocr-waiting"; pageCount: number; waitMs: number };
 
 export type OcrProgressCallback = (event: OcrProgressEvent) => void;
 
