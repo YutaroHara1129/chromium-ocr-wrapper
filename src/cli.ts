@@ -204,7 +204,7 @@ async function resolveInputFiles(inputs: string[]): Promise<ResolvedFile[]> {
     let dotOption = false;
 
     if (isDir) {
-      globPattern = join(escape(absInput), "**/*.pdf");
+      globPattern = join(escape(absInput, { magicalBraces: true }), "**/*.pdf");
       baseDir = absInput;
       dotOption = true;
     } else if (isFile) {
