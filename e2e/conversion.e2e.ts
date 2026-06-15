@@ -16,9 +16,17 @@ import {
 
 const OCR_BUFFER_MS = 20_000;
 const CLI_OVERHEAD_MS = 40_000;
+const CHUNK_SIZE = 50;
+const CHUNK_OVERHEAD_MS = 25_000;
 
 function testTimeout(pageCount: number): number {
-  return pageCount * 300 + OCR_BUFFER_MS + CLI_OVERHEAD_MS;
+  const additionalChunks = Math.max(0, Math.ceil(pageCount / CHUNK_SIZE) - 1);
+  return (
+    pageCount * 300 +
+    OCR_BUFFER_MS +
+    CLI_OVERHEAD_MS +
+    additionalChunks * CHUNK_OVERHEAD_MS
+  );
 }
 
 function countFontObjects(pdfBytes: Buffer): number {

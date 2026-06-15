@@ -1065,6 +1065,35 @@ describe("runCli", () => {
     );
   });
 
+ it("exits non-zero when failedPageIndices is present in verification", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    mocks.globMock.mockResolvedValue(["/docs/input.pdf"]);
+    mocks.state.convertImplementation = vi.fn(
+      async (options: ConversionOptionsLike) => ({
+        inputPath: options.inputPath,
+        outputPath: options.inputPath.replace(/\.pdf$/i, "_searchable.pdf"),
+        pageCount: 5,
+        textSize: 12000,
+        kind: "image_only",
+        pagesMadeSearchable: 4,
+        ocrVerification: {
+          totalPages: 5,
+          ocrTargetPages: 5,
+          verifiedPages: 4,
+          failedPageIndices: [2],
+        },
+      }),
+    );
+
+    await runCli(["node", "cli.js", "/docs/input.pdf"]);
+
+    expect(process.exitCode).toBe(1);
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("could not be OCR'd"),
+    );
+  });
+
   it("logs INCOMPLETE when verifiedPages < ocrTargetPages", async () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
 
