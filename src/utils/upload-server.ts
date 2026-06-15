@@ -7,11 +7,10 @@ import {
 } from "node:http";
 import { randomUUID } from "node:crypto";
 
-function cleanupPartialUpload(tempOutputPath: string): void {
-  void unlink(tempOutputPath).catch(() => {
+async function cleanupPartialUpload(tempOutputPath: string): Promise<void> {
+  await unlink(tempOutputPath).catch(() => {
     // Best-effort cleanup only. The stream/request error is propagated through
     // `done`; unlink may fail because the temp file was never created.
-    // The rejection is handled here to avoid an unhandled promise rejection.
   });
 }
 
@@ -66,21 +65,32 @@ export async function createUploadServer(
 
       const ws = createWriteStream(tempOutputPath);
       let bytesWritten = 0;
+      let settled = false;
+
+      const failUpload = (err: Error, responseMessage: string): void => {
+        if (settled) return;
+        settled = true;
+        ws.destroy();
+        if (!res.headersSent) {
+          res.writeHead(500, CORS_HEADERS);
+        }
+        res.end(responseMessage);
+        void cleanupPartialUpload(tempOutputPath).finally(() => rejectDone(err));
+      };
 
       req.on("data", (chunk: Buffer) => {
         bytesWritten += chunk.length;
       });
 
       ws.on("error", (err: Error) => {
-        cleanupPartialUpload(tempOutputPath);
-        res.writeHead(500, CORS_HEADERS);
-        res.end("Write error");
-        rejectDone(err);
+        failUpload(err, "Write error");
       });
 
       req.pipe(ws);
 
       ws.on("finish", () => {
+        if (settled) return;
+        settled = true;
         res.writeHead(200, {
           ...CORS_HEADERS,
           "Content-Type": "text/plain",
@@ -90,11 +100,7 @@ export async function createUploadServer(
       });
 
       req.on("error", (err: Error) => {
-        ws.destroy();
-        cleanupPartialUpload(tempOutputPath);
-        res.writeHead(500, CORS_HEADERS);
-        res.end("Request error");
-        rejectDone(err);
+        failUpload(err, "Request error");
       });
     },
   );
