@@ -597,10 +597,15 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
         const singlePageBytes = Buffer.from(
           await singlePageDoc.save({ useObjectStreams: false }),
         );
-        const singlePageText = singlePageBytes.toString("latin1");
+       const singlePageText = singlePageBytes.toString("latin1");
+        // Count DCTDecode occurrences — if a page has multiple JPEG image
+        // streams (tiled/segmented scan), extracting only the first would
+        // corrupt the page during rescue merge.  Skip such pages so the
+        // original content is preserved.
+        const dctCount = singlePageText.split("/DCTDecode").length - 1;
+        if (dctCount !== 1) continue;
         const dctIdx = singlePageText.indexOf("/DCTDecode");
-        if (dctIdx < 0) continue;
-        const streamMarker = singlePageText.indexOf("stream", dctIdx);
+       const streamMarker = singlePageText.indexOf("stream", dctIdx);
         if (streamMarker < 0) continue;
         const streamHeaderEnd = singlePageText.indexOf("\n", streamMarker) + 1;
         if (streamHeaderEnd <= 0) continue;
