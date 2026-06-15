@@ -185,8 +185,8 @@ export function verifyPerPageText(buffer: Buffer): OcrVerificationResult {
   let verifiedPages = 0;
 
   for (const refs of pageRefs) {
-    for (const refNum of refs) {
-      const content = resolveStreamText(text, buffer, refNum);
+    for (const [objNum, genNum] of refs) {
+      const content = resolveStreamText(text, buffer, objNum, genNum);
       if (content !== null && /\b(?:BT|Tj|TJ|Td)\b/.test(content)) {
         verifiedPages++;
         break;
@@ -197,8 +197,8 @@ export function verifyPerPageText(buffer: Buffer): OcrVerificationResult {
   return { totalPages, ocrTargetPages: totalPages, verifiedPages };
 }
 
-function collectPageContentRefsFromText(text: string): number[][] {
-  const result: number[][] = [];
+function collectPageContentRefsFromText(text: string): [number, number][][] {
+  const result: [number, number][][] = [];
   const pageRegex = /\/Type\s*\/Page\b(?!s)/g;
   let match;
 
@@ -219,46 +219,50 @@ function collectPageContentRefsFromText(text: string): number[][] {
 
     const arrayMatch = region.match(/\/Contents\s*\[\s*([^\]]+)\]/);
     if (arrayMatch && arrayMatch[1]) {
-      const refs: number[] = [];
-      const refRegex = /(\d+)\s+\d+\s+R/g;
+      const refs: [number, number][] = [];
+      const refRegex = /(\d+)\s+(\d+)\s+R/g;
       let refMatch;
       while ((refMatch = refRegex.exec(arrayMatch[1])) !== null) {
-        refs.push(parseInt(refMatch[1]!, 10));
+        refs.push([parseInt(refMatch[1]!, 10), parseInt(refMatch[2]!, 10)]);
       }
       if (refs.length > 0) result.push(refs);
       continue;
     }
 
-    const singleMatch = region.match(/\/Contents\s+(\d+)\s+\d+\s+R/);
+    const singleMatch = region.match(/\/Contents\s+(\d+)\s+(\d+)\s+R/);
     if (singleMatch && singleMatch[1]) {
-      result.push([parseInt(singleMatch[1]!, 10)]);
+      result.push([[parseInt(singleMatch[1]!, 10), parseInt(singleMatch[2]!, 10)]]);
     }
   }
 
   return result;
 }
 
-function collectPageContentRefs(text: string, buffer: Buffer, expectedPageCount: number): number[][] {
+function collectPageContentRefs(text: string, buffer: Buffer, expectedPageCount: number): [number, number][][] {
   const fromRawText = collectPageContentRefsFromText(text);
   if (fromRawText.length === expectedPageCount) return fromRawText;
 
   let totalDecompressed = 0;
+  const accumulated: [number, number][][] = [];
   for (const streamText of flateStreamIterator(text, buffer)) {
     totalDecompressed += streamText.length;
     if (totalDecompressed > MAX_TOTAL_BUDGET) break;
     const fromStream = collectPageContentRefsFromText(streamText);
     if (fromStream.length === expectedPageCount) return fromStream;
+    accumulated.push(...fromStream);
   }
 
-  return fromRawText;
+  return accumulated.length > fromRawText.length ? accumulated : fromRawText;
 }
 
 function resolveStreamText(
   text: string,
   buffer: Buffer,
   objNum: number,
+  genNum?: number,
 ): string | null {
-  const objPattern = new RegExp(`\\b${objNum}\\s+\\d+\\s+obj\\b`);
+  const genPattern = genNum !== undefined ? genNum : `\\d+`;
+  const objPattern = new RegExp(`\\b${objNum}\\s+${genPattern}\\s+obj\\b`);
   const objMatch = objPattern.exec(text);
   if (!objMatch) return null;
 
@@ -272,13 +276,14 @@ function resolveStreamText(
   if (!streamMarkerMatch || streamMarkerMatch.index === undefined) {
     const indirectArrayMatch = objBody.match(/\[\s*((?:\d+\s+\d+\s+R\s*)+)\]/);
     if (indirectArrayMatch) {
-      const refRegex = /(\d+)\s+\d+\s+R/g;
+      const refRegex = /(\d+)\s+(\d+)\s+R/g;
       let refMatch;
       const parts: string[] = [];
       while ((refMatch = refRegex.exec(indirectArrayMatch[1]!)) !== null) {
         const refNum = parseInt(refMatch[1]!, 10);
+        const refGen = parseInt(refMatch[2]!, 10);
         if (refNum === objNum) continue;
-        const resolved = resolveStreamText(text, buffer, refNum);
+        const resolved = resolveStreamText(text, buffer, refNum, refGen);
         if (resolved !== null) parts.push(resolved);
       }
       return parts.length > 0 ? parts.join("\n") : null;
