@@ -12,6 +12,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     rm: vi.fn(),
     stat: vi.fn(),
     unlink: vi.fn(),
+    writeFile: vi.fn(),
   };
 });
 
@@ -36,8 +37,10 @@ vi.mock("../utils/pdf-info.js", () => ({
 import { spawn } from "node:child_process";
 import { createUploadServer } from "../utils/upload-server.js";
 import { verifyPerPageText } from "../utils/pdf-info.js";
-import { copyFile, cp, mkdtemp, readFile, rename, rm, stat, unlink } from "node:fs/promises";
+import { copyFile, cp, mkdtemp, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { chromium } from "playwright-core";
+import { createCanvas } from "canvas";
+import { PDFDocument } from "pdf-lib";
 import { ChromeSearchifyPrinter } from "./chrome-searchify-printer.js";
 import { saveAndUpload } from "./viewer-save-ops.js";
 import type { OcrVerificationResult } from "../types/index.js";
@@ -206,6 +209,55 @@ function mockProfile(profileDir = "/tmp/chromium-ocr-test-profile"): void {
   vi.mocked(copyFile).mockResolvedValue(undefined);
   vi.mocked(stat).mockResolvedValue({ size: 1234 } as never);
   vi.mocked(readFile).mockResolvedValue(Buffer.from("fake pdf content"));
+  vi.mocked(writeFile).mockResolvedValue(undefined);
+}
+
+type LocalRetryAccess = {
+  attemptLocalRetry(
+    inputPath: string,
+    outputPath: string,
+    failedIndices: number[],
+    options?: Parameters<ChromeSearchifyPrinter["searchifyToFile"]>[2],
+  ): Promise<OcrVerificationResult | null>;
+  searchifyToFileInternal(
+    inputPath: string,
+    outputPath: string,
+    options: Parameters<ChromeSearchifyPrinter["searchifyToFile"]>[2],
+    allowLocalRetry: boolean,
+  ): Promise<OcrVerificationResult>;
+};
+
+async function createThreePageRescueFixture(): Promise<{
+  input: Buffer;
+  output: Buffer;
+  rescueOutput: Buffer;
+}> {
+  const canvas = createCanvas(8, 8);
+  const context = canvas.getContext("2d");
+  context.fillStyle = "#111";
+  context.fillRect(0, 0, 8, 8);
+  const jpeg = canvas.toBuffer("image/jpeg");
+
+  const inputDoc = await PDFDocument.create();
+  inputDoc.addPage([300, 400]);
+  inputDoc.addPage([310, 410]);
+  const jpegPage = inputDoc.addPage([320, 420]);
+  const image = await inputDoc.embedJpg(jpeg);
+  jpegPage.drawImage(image, { x: 0, y: 0, width: 320, height: 420 });
+
+  const outputDoc = await PDFDocument.create();
+  outputDoc.addPage([300, 400]);
+  outputDoc.addPage([310, 410]);
+  outputDoc.addPage([320, 420]);
+
+  const rescueOutputDoc = await PDFDocument.create();
+  rescueOutputDoc.addPage([595, 842]);
+
+  return {
+    input: Buffer.from(await inputDoc.save({ useObjectStreams: false })),
+    output: Buffer.from(await outputDoc.save({ useObjectStreams: false })),
+    rescueOutput: Buffer.from(await rescueOutputDoc.save({ useObjectStreams: false })),
+  };
 }
 
 function mockChromeFound(): void {
@@ -362,6 +414,7 @@ describe("ChromeSearchifyPrinter", () => {
     mockProfile();
     mockFetchHealthy();
     mockUploadServer();
+    vi.mocked(verifyPerPageText).mockReturnValue(DEFAULT_VERIFICATION);
 
     const platformChromePaths: Record<string, string[]> = {
       darwin: [
@@ -439,6 +492,7 @@ describe("ChromeSearchifyPrinter", () => {
 
     mockProfile();
     mockUploadServer();
+    vi.mocked(verifyPerPageText).mockReturnValue(DEFAULT_VERIFICATION);
     const chromeProcess = createChromeProcess();
     vi.mocked(spawn).mockReturnValue(chromeProcess as never);
 
@@ -524,7 +578,7 @@ describe("ChromeSearchifyPrinter", () => {
     const promise = printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", { chromePath: "/custom/chrome" });
     promise.catch(() => {});
 
-    await advanceUntilSettled(promise, 20_000);
+    await advanceUntilSettled(promise, 30_000);
 
     await expect(promise).rejects.toThrow("PDF viewer frame not found within 15 seconds");
 
@@ -596,6 +650,7 @@ describe("ChromeSearchifyPrinter", () => {
 
     mockProfile();
     mockUploadServer();
+    vi.mocked(verifyPerPageText).mockReturnValue(DEFAULT_VERIFICATION);
     vi.mocked(rm).mockRejectedValue(new Error("rm failed"));
     mockFetchHealthy();
 
@@ -781,6 +836,7 @@ describe("ChromeSearchifyPrinter", () => {
 
     mockProfile();
     mockFetchHealthy();
+    vi.mocked(verifyPerPageText).mockReturnValue(DEFAULT_VERIFICATION);
     vi.mocked(createUploadServer).mockResolvedValue({
       url: "http://127.0.0.1:54321/upload?token=test-token",
       done: Promise.resolve(1234),
@@ -800,7 +856,7 @@ describe("ChromeSearchifyPrinter", () => {
     ).rejects.toThrow("upload server close failed");
 
     expect(uploadServerClose).toHaveBeenCalled();
-    expect(rename).toHaveBeenCalledTimes(1);
+    expect(rename).not.toHaveBeenCalled();
   });
 
   it("throws when upload succeeds but output file is empty", async () => {
@@ -884,6 +940,7 @@ describe("ChromeSearchifyPrinter", () => {
     mockProfile();
     mockUploadServer();
     mockFetchHealthy();
+    vi.mocked(verifyPerPageText).mockReturnValue(DEFAULT_VERIFICATION);
 
     const chromeProcess = createChromeProcess();
     vi.mocked(spawn).mockReturnValue(chromeProcess as never);
@@ -942,7 +999,7 @@ describe("ChromeSearchifyPrinter", () => {
     const customVerification: OcrVerificationResult = {
       totalPages: 5,
       ocrTargetPages: 4,
-      verifiedPages: 3,
+      verifiedPages: 4,
     };
     mockSearchifyRuntime({ chromePath: "/custom/chrome", verification: customVerification });
 
@@ -1140,7 +1197,7 @@ describe("ChromeSearchifyPrinter", () => {
       });
 
       expect(onOcrProgress).toHaveBeenCalledWith(
-        expect.objectContaining({ type: "ocr-waiting", pageCount: 3, waitMs: 300 }),
+        expect.objectContaining({ type: "ocr-waiting", pageCount: 3, waitMs: 900 }),
       );
     });
 
@@ -1153,6 +1210,236 @@ describe("ChromeSearchifyPrinter", () => {
       });
 
       expect(frame.scrolledPages).toEqual([0, 1, 2, 3, 4]);
+    });
+  });
+
+  describe("OCR recovery strategy", () => {
+    const PARTIAL_VERIFICATION: OcrVerificationResult = {
+      totalPages: 3,
+      ocrTargetPages: 3,
+      verifiedPages: 1,
+      pageStatuses: ["text", "image_without_text", "text"],
+    };
+
+    it("does not retry when all pages verified on first attempt", async () => {
+      mockSearchifyRuntime({ chromePath: "/custom/chrome" });
+
+      await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+        chromePath: "/custom/chrome",
+      });
+
+      expect(vi.mocked(verifyPerPageText)).toHaveBeenCalledTimes(1);
+    });
+
+    it("resolves temporal failure with single re-scroll retry", async () => {
+      mockSearchifyRuntime({ chromePath: "/custom/chrome" });
+      vi.mocked(verifyPerPageText)
+        .mockReturnValueOnce(PARTIAL_VERIFICATION)
+        .mockReturnValueOnce(DEFAULT_VERIFICATION);
+
+      const result = await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+        chromePath: "/custom/chrome",
+      });
+
+      expect(result).toEqual(DEFAULT_VERIFICATION);
+      expect(result.failedPageIndices ?? []).toEqual([]);
+      expect(vi.mocked(verifyPerPageText)).toHaveBeenCalledTimes(2);
+    }, 30_000);
+
+    it("does at most 1 re-scroll retry before giving up (no blind looping)", async () => {
+      mockSearchifyRuntime({ chromePath: "/custom/chrome" });
+      vi.mocked(verifyPerPageText).mockReturnValue(PARTIAL_VERIFICATION);
+
+      await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+        chromePath: "/custom/chrome",
+        maxRetries: 5,
+      });
+
+      // NOT 6 calls (maxRetries+1). At most 2: initial + 1 re-scroll.
+      expect(vi.mocked(verifyPerPageText)).toHaveBeenCalledTimes(2);
+    }, 30_000);
+
+    it("allows maxRetries=0 to skip the temporal retry", async () => {
+      mockSearchifyRuntime({ chromePath: "/custom/chrome" });
+      vi.mocked(verifyPerPageText).mockReturnValue(PARTIAL_VERIFICATION);
+
+      await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+        chromePath: "/custom/chrome",
+        maxRetries: 0,
+      });
+
+      expect(vi.mocked(verifyPerPageText)).toHaveBeenCalledTimes(1);
+    });
+
+    it("emits ocr-retry progress event before re-scroll", async () => {
+      const onOcrProgress = vi.fn();
+      mockSearchifyRuntime({ chromePath: "/custom/chrome" });
+      vi.mocked(verifyPerPageText)
+        .mockReturnValueOnce(PARTIAL_VERIFICATION)
+        .mockReturnValueOnce(DEFAULT_VERIFICATION);
+
+      await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+        chromePath: "/custom/chrome",
+        onOcrProgress,
+      });
+
+      expect(onOcrProgress).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "ocr-retry",
+          attempt: 1,
+        }),
+      );
+    }, 30_000);
+
+    it("populates failedPageIndices when all recovery fails", async () => {
+      mockSearchifyRuntime({ chromePath: "/custom/chrome" });
+      vi.mocked(verifyPerPageText).mockReturnValue(PARTIAL_VERIFICATION);
+
+      const result = await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+        chromePath: "/custom/chrome",
+      });
+
+      expect(result.failedPageIndices).toBeDefined();
+      expect(result.failedPageIndices).toEqual([1]);
+      expect(result.verifiedPages).toBe(1);
+    }, 30_000);
+
+    it("page is closed after recovery completes", async () => {
+      const { page } = mockSearchifyRuntime({ chromePath: "/custom/chrome" });
+      vi.mocked(verifyPerPageText)
+        .mockReturnValueOnce(PARTIAL_VERIFICATION)
+        .mockReturnValueOnce(DEFAULT_VERIFICATION);
+
+      await printer.searchifyToFile("/tmp/input.pdf", "/tmp/output.pdf", {
+        chromePath: "/custom/chrome",
+      });
+
+      expect(page.close).toHaveBeenCalledTimes(1);
+    }, 30_000);
+
+    it("runs one non-recursive local OCR pass and merges only mapped rescue pages", async () => {
+      mockProfile("/tmp/chromium-ocr-rescue-test");
+      const fixture = await createThreePageRescueFixture();
+      vi.mocked(readFile).mockImplementation(async (path) => {
+        const value = String(path);
+        if (value === "/tmp/input.pdf") return fixture.input;
+        if (value === "/tmp/output.pdf") return fixture.output;
+        if (value.endsWith("/rescue-output.pdf")) return fixture.rescueOutput;
+        throw new Error(`Unexpected read: ${value}`);
+      });
+
+      const localRetry = printer as unknown as LocalRetryAccess;
+      const internalSpy = vi
+        .spyOn(localRetry, "searchifyToFileInternal")
+        .mockResolvedValue({
+          totalPages: 1,
+          ocrTargetPages: 1,
+          verifiedPages: 1,
+          pageStatuses: ["text"],
+        });
+      const finalVerification: OcrVerificationResult = {
+        totalPages: 3,
+        ocrTargetPages: 3,
+        verifiedPages: 2,
+        pageStatuses: ["text", "image_without_text", "text"],
+      };
+      vi.mocked(verifyPerPageText)
+        .mockReturnValueOnce({
+          totalPages: 1,
+          ocrTargetPages: 1,
+          verifiedPages: 1,
+          pageStatuses: ["text"],
+        })
+        .mockReturnValueOnce(finalVerification);
+
+      const result = await localRetry.attemptLocalRetry(
+        "/tmp/input.pdf",
+        "/tmp/output.pdf",
+        [1, 2],
+      );
+
+      expect(internalSpy).toHaveBeenCalledTimes(1);
+      expect(internalSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/rescue-input\.pdf$/),
+        expect.stringMatching(/rescue-output\.pdf$/),
+        undefined,
+        false,
+      );
+      expect(result).toEqual(finalVerification);
+
+      const outputWrite = vi.mocked(writeFile).mock.calls.find(
+        ([path]) => String(path) === "/tmp/output.pdf",
+      );
+      expect(outputWrite).toBeDefined();
+      const merged = await PDFDocument.load(outputWrite![1] as Uint8Array);
+      expect(merged.getPageCount()).toBe(3);
+      expect(merged.getPage(1).getSize()).toEqual({ width: 310, height: 410 });
+      expect(merged.getPage(2).getSize()).toEqual({ width: 595, height: 842 });
+    });
+
+    it("does not launch local OCR when failed pages have no extractable JPEG", async () => {
+      mockProfile("/tmp/chromium-ocr-rescue-test");
+      const fixture = await createThreePageRescueFixture();
+      vi.mocked(readFile).mockResolvedValue(fixture.input);
+
+      const localRetry = printer as unknown as LocalRetryAccess;
+      const internalSpy = vi.spyOn(localRetry, "searchifyToFileInternal");
+
+      const result = await localRetry.attemptLocalRetry(
+        "/tmp/input.pdf",
+        "/tmp/output.pdf",
+        [1],
+      );
+
+      expect(result).toBeNull();
+      expect(internalSpy).not.toHaveBeenCalled();
+      expect(writeFile).not.toHaveBeenCalled();
+    });
+
+    it("keeps the existing page when local OCR does not verify the rescue page", async () => {
+      mockProfile("/tmp/chromium-ocr-rescue-test");
+      const fixture = await createThreePageRescueFixture();
+      vi.mocked(readFile).mockImplementation(async (path) => {
+        const value = String(path);
+        if (value === "/tmp/input.pdf") return fixture.input;
+        if (value === "/tmp/output.pdf") return fixture.output;
+        if (value.endsWith("/rescue-output.pdf")) return fixture.rescueOutput;
+        throw new Error(`Unexpected read: ${value}`);
+      });
+
+      const localRetry = printer as unknown as LocalRetryAccess;
+      vi.spyOn(localRetry, "searchifyToFileInternal").mockResolvedValue({
+        totalPages: 1,
+        ocrTargetPages: 1,
+        verifiedPages: 1,
+        pageStatuses: ["text"],
+      });
+      vi.mocked(verifyPerPageText)
+        .mockReturnValueOnce({
+          totalPages: 1,
+          ocrTargetPages: 1,
+          verifiedPages: 0,
+          pageStatuses: ["image_without_text"],
+        })
+        .mockReturnValueOnce({
+          totalPages: 3,
+          ocrTargetPages: 3,
+          verifiedPages: 2,
+          pageStatuses: ["text", "text", "image_without_text"],
+        });
+
+      await localRetry.attemptLocalRetry(
+        "/tmp/input.pdf",
+        "/tmp/output.pdf",
+        [2],
+      );
+
+      const outputWrite = vi.mocked(writeFile).mock.calls.find(
+        ([path]) => String(path) === "/tmp/output.pdf",
+      );
+      expect(outputWrite).toBeDefined();
+      const merged = await PDFDocument.load(outputWrite![1] as Uint8Array);
+      expect(merged.getPage(2).getSize()).toEqual({ width: 320, height: 420 });
     });
   });
 });

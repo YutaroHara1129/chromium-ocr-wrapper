@@ -48,6 +48,38 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
     outputPath: string,
     options?: SearchifyToFileOptions,
   ): Promise<OcrVerificationResult> {
+    return this.searchifyToFileInternal(inputPath, outputPath, options, true);
+  }
+
+  private async searchifyToFileInternal(
+    inputPath: string,
+    outputPath: string,
+    options: SearchifyToFileOptions | undefined,
+    allowLocalRetry: boolean,
+  ): Promise<OcrVerificationResult> {
+    const chunkSize = options?.chunkSize ?? 50;
+    if (chunkSize > 0) {
+      try {
+        const { readFile } = await import("node:fs/promises");
+        const { PDFDocument } = await import("pdf-lib");
+        const inputBuf = await readFile(inputPath);
+        const srcDoc = await PDFDocument.load(inputBuf, { ignoreEncryption: true });
+        const docPageCount = srcDoc.getPageCount();
+        if (docPageCount > chunkSize) {
+          return this.searchifyChunked(
+            srcDoc,
+            outputPath,
+            options,
+            docPageCount,
+            chunkSize,
+            allowLocalRetry,
+          );
+        }
+      } catch {
+        // File not readable or parseable; proceed with normal single-file processing
+      }
+    }
+
     const chromePath =
       options?.chromePath ?? (await this.findChrome());
     if (!chromePath) {
@@ -116,61 +148,126 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
 
       const viewerFrame = await this.waitForViewerFrame(page, options?.verbose);
 
-      await this.waitForSearchifyComplete(viewerFrame, {
+      const { pageCount } = await this.waitForSearchifyComplete(viewerFrame, {
         verbose: options?.verbose,
         onOcrProgress: options?.onOcrProgress,
       });
 
       const saveTimeoutMs = options?.saveTimeoutMs ?? 120_000;
       const uploadTimeoutMs = options?.uploadTimeoutMs ?? 120_000;
+      const onOcrProgress = options?.onOcrProgress;
 
-      uploadServer = await createUploadServer(tempOutputPath, uploadTimeoutMs);
-
-      const uploadResult = await viewerFrame.evaluate(
-        saveAndUpload,
-        {
+      const saveAndVerify = async (): Promise<OcrVerificationResult> => {
+        uploadServer = await createUploadServer(tempOutputPath, uploadTimeoutMs);
+        const uploadResult = await viewerFrame.evaluate(saveAndUpload, {
           uploadUrl: uploadServer.url,
           saveTimeoutMs,
-        },
-      );
-
-      await page.close();
-      page = null;
-
-      if (uploadResult.uploaded) {
+        });
+        if (!uploadResult.uploaded) {
+          throw new Error(`Save failed (${uploadResult.reason})`);
+        }
         await uploadServer.done;
         const tempStats = await stat(tempOutputPath);
         if (tempStats.size === 0) {
           throw new Error("Upload completed but output file is empty");
         }
-
         if (options?.verbose) {
           console.error(
             `[ChromeSearchifyPrinter] Received ${tempStats.size} bytes via upload (saveType=${uploadResult.saveType})`,
           );
         }
-
+        await uploadServer.close();
         await rename(tempOutputPath, outputPath);
-      } else {
-        throw new Error(
-          `Save failed (${uploadResult.reason})`,
-        );
+        const { readFile } = await import("node:fs/promises");
+        const outputBuffer = await readFile(outputPath);
+        const result = verifyPerPageText(outputBuffer);
+        if (options?.verbose) {
+          console.error(
+            `[ChromeSearchifyPrinter] Verification: ${result.verifiedPages}/${result.ocrTargetPages} pages verified`,
+          );
+        }
+        return result;
+      };
+
+      // Step 0: Initial OCR
+      let verification = await saveAndVerify();
+      if (verification.verifiedPages >= verification.ocrTargetPages) {
+        await page.close();
+        page = null;
+        return verification;
       }
 
-      await uploadServer.close();
-      uploadServer = null;
-
-      const { readFile } = await import("node:fs/promises");
-      const outputBuffer = await readFile(outputPath);
-      const verification = verifyPerPageText(outputBuffer);
-
-      if (options?.verbose) {
-        console.error(
-          `[ChromeSearchifyPrinter] Verification: ${verification.verifiedPages}/${verification.ocrTargetPages} pages verified`,
-        );
+      // Step 1: Temporal retry (single re-scroll of failed pages).
+      // maxRetries=0 disables this compatibility retry; positive values are
+      // intentionally capped at one so structural recovery is not delayed.
+      const temporalRetryCount = options?.maxRetries === 0 ? 0 : 1;
+      if (temporalRetryCount > 0) {
+        onOcrProgress?.({
+          type: "ocr-retry",
+          attempt: 1,
+          maxRetries: 1,
+          verifiedPages: verification.verifiedPages,
+          totalPages: verification.totalPages,
+        });
+        const failedIndices = this.extractFailedPageIndices(verification);
+        if (failedIndices.length > 0) {
+          if (options?.verbose) {
+            console.error(
+              `[ChromeSearchifyPrinter] Targeted re-scroll: ${failedIndices.length} unverified pages`,
+            );
+          }
+          await this.scrollSpecificPagesInViewer(
+            viewerFrame,
+            failedIndices,
+            onOcrProgress,
+            pageCount,
+            1000,
+          );
+          const waitMs = Math.max(failedIndices.length * 1000, 10_000);
+          onOcrProgress?.({ type: "ocr-waiting", pageCount: failedIndices.length, waitMs });
+          await new Promise((r) => setTimeout(r, waitMs));
+        }
+        verification = await saveAndVerify();
+        if (verification.verifiedPages >= verification.ocrTargetPages) {
+          await page.close();
+          page = null;
+          return verification;
+        }
       }
 
-      return verification;
+      // Step 2: Structural fix (local retry with A4 transform).
+      await page.close();
+      page = null;
+      await this.close();
+      const stillFailed = this.extractFailedPageIndices(verification);
+      if (allowLocalRetry && stillFailed.length > 0) {
+        try {
+          const retryResult = await this.attemptLocalRetry(
+            inputPath,
+            outputPath,
+            stillFailed,
+            options,
+          );
+          if (retryResult) {
+            verification = retryResult;
+            if (verification.verifiedPages >= verification.ocrTargetPages) {
+              return verification;
+            }
+          }
+        } catch (retryError) {
+          if (options?.verbose) {
+            const msg = retryError instanceof Error ? retryError.message : String(retryError);
+            console.error(`[ChromeSearchifyPrinter] Local retry failed: ${msg}`);
+          }
+        }
+      }
+
+      // Step 3: Give up — report failures
+      const finalFailed = this.extractFailedPageIndices(verification);
+      return {
+        ...verification,
+        failedPageIndices: finalFailed.length > 0 ? finalFailed : undefined,
+      };
     } catch (error) {
       if (page) {
         try {
@@ -182,7 +279,7 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
       }
       if (uploadServer) {
         try {
-          await uploadServer.close();
+          await (uploadServer as UploadServerResult).close();
         } catch (closeError) {
           const msg = closeError instanceof Error ? closeError.message : String(closeError);
           console.error(`[ChromeSearchifyPrinter] uploadServer.close() failed during error cleanup: ${msg}`);
@@ -318,7 +415,7 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
       verbose?: boolean;
       onOcrProgress?: OcrProgressCallback;
     },
-  ): Promise<void> {
+  ): Promise<{ pageCount: number }> {
     const verbose = options?.verbose;
     const onOcrProgress = options?.onOcrProgress;
 
@@ -375,28 +472,9 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
       throw new Error("PDF has no pages to process");
     }
 
-    for (let i = 0; i < pageCount; i++) {
-      await viewerFrame.evaluate(
-        /* v8 ignore start -- browser-side callback; not executed in Node.js unit tests */
-        (pageIndex: number) => {
-          const g = globalThis as Record<string, unknown>;
-          const viewer = g["viewer"] as Record<string, unknown> | undefined;
-          if (!viewer) return;
-          const viewport = viewer["viewport_"] as Record<string, unknown> | undefined;
-          if (viewport && typeof viewport["goToPage"] === "function") {
-            (viewport["goToPage"] as Function).call(viewport, pageIndex);
-          }
-        },
-        /* v8 ignore end */
-        i,
-      );
+    await this.scrollPagesInViewer(viewerFrame, pageCount, onOcrProgress);
 
-      onOcrProgress?.({ type: "page-scrolled", pageIndex: i, pageCount });
-
-      await new Promise((r) => setTimeout(r, 300));
-    }
-
-    const waitMs = pageCount * 100;
+    const waitMs = pageCount * 300;
 
     onOcrProgress?.({ type: "ocr-waiting", pageCount, waitMs });
 
@@ -423,9 +501,291 @@ export class ChromeSearchifyPrinter implements IChromeSearchifyPrinter {
     if (onOcrProgress) {
       onOcrProgress({ type: "document-completed", pageCount, elapsedMs: 0 });
     }
+
+    return { pageCount };
   }
 
-  private async setupProfile(verbose?: boolean): Promise<string> {
+  private async scrollPagesInViewer(
+    viewerFrame: Frame,
+    pageCount: number,
+    onOcrProgress?: OcrProgressCallback,
+  ): Promise<void> {
+    await this.scrollSpecificPagesInViewer(
+      viewerFrame,
+      Array.from({ length: pageCount }, (_, i) => i),
+      onOcrProgress,
+      pageCount,
+      300,
+    );
+  }
+
+  private extractFailedPageIndices(
+    verification: OcrVerificationResult,
+  ): number[] {
+    const statuses = verification.pageStatuses;
+    if (!statuses || statuses.length === 0) return [];
+    const failed: number[] = [];
+    for (let i = 0; i < statuses.length; i++) {
+      const status = statuses[i]!;
+      if (status === "image_without_text" || status === "unresolved") {
+        failed.push(i);
+      }
+    }
+    return failed;
+  }
+
+  private async scrollSpecificPagesInViewer(
+    viewerFrame: Frame,
+    pageIndices: number[],
+    onOcrProgress?: OcrProgressCallback,
+    pageCount?: number,
+    delayMs = 300,
+  ): Promise<void> {
+    for (const pageIndex of pageIndices) {
+      await viewerFrame.evaluate(
+        /* v8 ignore start -- browser-side callback; not executed in Node.js unit tests */
+        (pageIndex: number) => {
+          const g = globalThis as Record<string, unknown>;
+          const viewer = g["viewer"] as Record<string, unknown> | undefined;
+          if (!viewer) return;
+          const viewport = viewer["viewport_"] as Record<string, unknown> | undefined;
+          if (viewport && typeof viewport["goToPage"] === "function") {
+            (viewport["goToPage"] as Function).call(viewport, pageIndex);
+          }
+        },
+        /* v8 ignore end */
+        pageIndex,
+      );
+
+      onOcrProgress?.({ type: "page-scrolled", pageIndex, pageCount: pageCount ?? pageIndices.length });
+
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+
+  private async attemptLocalRetry(
+    inputPath: string,
+    outputPath: string,
+    failedIndices: number[],
+    options?: SearchifyToFileOptions,
+  ): Promise<OcrVerificationResult | null> {
+    const { PDFDocument } = await import("pdf-lib");
+    const { readFile, writeFile, mkdtemp, rm } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+
+    const tmpDir = await mkdtemp(join(tmpdir(), "chromium-ocr-rescue-"));
+    try {
+      if (options?.verbose) {
+        console.error(
+          `[ChromeSearchifyPrinter] Local retry: re-processing ${failedIndices.length} failed pages at enlarged size`,
+        );
+      }
+
+      const inputBuf = await readFile(inputPath);
+      const srcDoc = await PDFDocument.load(inputBuf, { ignoreEncryption: true });
+      const rescueDoc = await PDFDocument.create();
+      const rescuePageBySourceIndex = new Map<number, number>();
+
+      for (const idx of failedIndices) {
+        if (idx < 0 || idx >= srcDoc.getPageCount()) {
+          continue;
+        }
+        const singlePageDoc = await PDFDocument.create();
+        const [singlePage] = await singlePageDoc.copyPages(srcDoc, [idx]);
+        singlePageDoc.addPage(singlePage);
+        const singlePageBytes = Buffer.from(
+          await singlePageDoc.save({ useObjectStreams: false }),
+        );
+       const singlePageText = singlePageBytes.toString("latin1");
+        // Count DCTDecode occurrences — if a page has multiple JPEG image
+        // streams (tiled/segmented scan), extracting only the first would
+        // corrupt the page during rescue merge.  Skip such pages so the
+        // original content is preserved.
+        const dctCount = singlePageText.split("/DCTDecode").length - 1;
+        if (dctCount !== 1) continue;
+        const dctIdx = singlePageText.indexOf("/DCTDecode");
+       const streamMarker = singlePageText.indexOf("stream", dctIdx);
+        if (streamMarker < 0) continue;
+        const streamHeaderEnd = singlePageText.indexOf("\n", streamMarker) + 1;
+        if (streamHeaderEnd <= 0) continue;
+        const dataEnd = singlePageText.indexOf("endstream", streamHeaderEnd);
+        if (dataEnd < 0) continue;
+        let actualEnd = dataEnd;
+        while (actualEnd > streamHeaderEnd && (singlePageText[actualEnd - 1] === "\n" || singlePageText[actualEnd - 1] === "\r")) {
+          actualEnd--;
+        }
+        const jpegData = Uint8Array.from(singlePageBytes.subarray(streamHeaderEnd, actualEnd));
+        if (jpegData[0] !== 0xff || jpegData[1] !== 0xd8) continue;
+        const img = await rescueDoc.embedJpg(jpegData);
+        const rescuePageIndex = rescueDoc.getPageCount();
+        const rescuePage = rescueDoc.addPage([595, 842]);
+        rescuePage.drawImage(img, { x: 0, y: 0, width: 595, height: 842 });
+        rescuePageBySourceIndex.set(idx, rescuePageIndex);
+      }
+
+      if (rescuePageBySourceIndex.size === 0) {
+        return null;
+      }
+
+      const rescueBytes = Buffer.from(await rescueDoc.save({ useObjectStreams: false }));
+      const rescueInputPath = join(tmpDir, "rescue-input.pdf");
+      const rescueOutputPath = join(tmpDir, "rescue-output.pdf");
+      await writeFile(rescueInputPath, rescueBytes);
+
+      const rescueResult = await this.searchifyToFileInternal(
+        rescueInputPath,
+        rescueOutputPath,
+        options,
+        false,
+      );
+
+      if (rescueResult.verifiedPages === 0) {
+        return null;
+      }
+
+      const outputBuf = await readFile(outputPath);
+      const outputDoc = await PDFDocument.load(outputBuf, { ignoreEncryption: true });
+      const rescueBuf = await readFile(rescueOutputPath);
+      const rescueDocOut = await PDFDocument.load(rescueBuf, { ignoreEncryption: true });
+      const rescueVerification = verifyPerPageText(rescueBuf);
+
+      const totalPages = outputDoc.getPageCount();
+      const finalDoc = await PDFDocument.create();
+
+      for (let i = 0; i < totalPages; i++) {
+        const rescuePageIndex = rescuePageBySourceIndex.get(i);
+        if (rescuePageIndex !== undefined) {
+          const status = rescueVerification.pageStatuses?.[rescuePageIndex];
+          if (
+            (status === "text" || status === "blank") &&
+            rescuePageIndex < rescueDocOut.getPageCount()
+          ) {
+            const [rescuedPage] = await finalDoc.copyPages(rescueDocOut, [rescuePageIndex]);
+            finalDoc.addPage(rescuedPage);
+          } else {
+            const [origPage] = await finalDoc.copyPages(outputDoc, [i]);
+            finalDoc.addPage(origPage);
+          }
+        } else {
+          const [page] = await finalDoc.copyPages(outputDoc, [i]);
+          finalDoc.addPage(page);
+        }
+      }
+
+      const finalBytes = Buffer.from(await finalDoc.save({ useObjectStreams: false }));
+      await writeFile(outputPath, finalBytes);
+      return verifyPerPageText(finalBytes);
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  }
+
+  private async searchifyChunked(
+    srcDoc: import("pdf-lib").PDFDocument,
+    outputPath: string,
+    options: SearchifyToFileOptions | undefined,
+    pageCount: number,
+    chunkSize: number,
+    allowLocalRetry: boolean,
+  ): Promise<OcrVerificationResult> {
+    const { PDFDocument } = await import("pdf-lib");
+    const { readFile, writeFile } = await import("node:fs/promises");
+    const tmpDir = await mkdtemp(join(tmpdir(), "chromium-ocr-chunks-"));
+
+    try {
+      const chunkCount = Math.ceil(pageCount / chunkSize);
+      const chunkOutputPaths: string[] = [];
+
+      for (let c = 0; c < chunkCount; c++) {
+        const startPage = c * chunkSize;
+        const endPage = Math.min(startPage + chunkSize, pageCount);
+
+        if (options?.verbose) {
+          console.error(
+            `[ChromeSearchifyPrinter] Chunk ${c + 1}/${chunkCount}: pages ${startPage}-${endPage - 1}`,
+          );
+        }
+
+        const chunkDoc = await PDFDocument.create();
+        const pageIndices = Array.from(
+          { length: endPage - startPage },
+          (_, j) => startPage + j,
+        );
+        const pages = await chunkDoc.copyPages(srcDoc, pageIndices);
+        pages.forEach((p) => chunkDoc.addPage(p));
+        const chunkBytes = Buffer.from(await chunkDoc.save({ useObjectStreams: false }));
+
+        const chunkInputPath = join(tmpDir, `chunk-${c}-input.pdf`);
+        const chunkOutputPath = join(tmpDir, `chunk-${c}-output.pdf`);
+        await writeFile(chunkInputPath, chunkBytes);
+        chunkOutputPaths.push(chunkOutputPath);
+
+        const chunkOptions: SearchifyToFileOptions = {
+          ...options,
+          chunkSize: undefined,
+        };
+
+        const chunkResult = await this.searchifyToFileInternal(
+          chunkInputPath,
+          chunkOutputPath,
+          chunkOptions,
+          allowLocalRetry,
+        );
+
+        if (options?.verbose) {
+          console.error(
+            `[ChromeSearchifyPrinter] Chunk ${c + 1} result: ${chunkResult.verifiedPages}/${chunkResult.ocrTargetPages} verified`,
+          );
+        }
+
+        this.close().catch(() => {});
+      }
+
+      if (options?.verbose) {
+        console.error(`[ChromeSearchifyPrinter] Merging ${chunkOutputPaths.length} chunks...`);
+      }
+
+      const mergedDoc = await PDFDocument.create();
+      for (const chunkPath of chunkOutputPaths) {
+        const chunkBuf = await readFile(chunkPath);
+        const chunkDoc = await PDFDocument.load(chunkBuf, { ignoreEncryption: true });
+        const pages = await mergedDoc.copyPages(chunkDoc, chunkDoc.getPageIndices());
+        pages.forEach((p) => mergedDoc.addPage(p));
+      }
+      const mergedBytes = Buffer.from(await mergedDoc.save({ useObjectStreams: false }));
+
+      await writeFile(outputPath, mergedBytes);
+
+      let finalVerification = verifyPerPageText(mergedBytes);
+
+      // Since searchifyToFile now handles local retry internally, each chunk's
+      // result already includes best-effort recovery. We only need to check
+      // for any remaining failures across the merged output.
+      const failedPageIndices = finalVerification.pageStatuses
+        ? finalVerification.pageStatuses
+            .map((s, i) => ({ index: i, status: s }))
+            .filter((p) => p.status === "image_without_text" || p.status === "unresolved")
+            .map((p) => p.index)
+        : [];
+
+      if (failedPageIndices.length > 0) {
+        finalVerification = { ...finalVerification, failedPageIndices };
+      }
+
+      if (options?.verbose) {
+        console.error(
+          `[ChromeSearchifyPrinter] Merged result: ${finalVerification.verifiedPages}/${finalVerification.ocrTargetPages} verified`,
+        );
+      }
+
+      return finalVerification;
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  }
+
+ private async setupProfile(verbose?: boolean): Promise<string> {
     const profileDir = await mkdtemp(join(tmpdir(), "chromium-ocr-"));
     const homeDir = process.env.HOME ?? "";
 

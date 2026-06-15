@@ -154,6 +154,11 @@ export async function runCli(argv: string[]): Promise<void> {
                         `[ocr] completed ${event.pageCount} pages\n`,
                       );
                       break;
+                    case "ocr-retry":
+                      process.stderr.write(
+                        `\n[ocr] retry ${event.attempt}/${event.maxRetries}: ${event.verifiedPages}/${event.totalPages} pages verified\n`,
+                      );
+                      break;
                     case "timeout":
                       process.stderr.write(
                         `[ocr] timeout after ${event.elapsedMs}ms / ${event.timeoutMs}ms\n`,
@@ -185,6 +190,13 @@ export async function runCli(argv: string[]): Promise<void> {
             console.log(
               `Done: ${result.inputPath} -> ${result.outputPath} (${result.pageCount} pages, ${ocrNote})`,
             );
+            if (result.ocrVerification?.failedPageIndices?.length) {
+              const pages = result.ocrVerification.failedPageIndices.map((i) => i + 1).join(", ");
+              console.error(
+                `Warning: ${result.ocrVerification.failedPageIndices.length} page(s) could not be OCR'd (page ${pages})`,
+              );
+              process.exitCode = 1;
+            }
           } catch (error: unknown) {
             const message =
               error instanceof Error ? error.message : String(error);
