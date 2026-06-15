@@ -187,7 +187,7 @@ export function verifyPerPageText(buffer: Buffer): OcrVerificationResult {
   for (const refs of pageRefs) {
     for (const [objNum, genNum] of refs) {
       const content = resolveStreamText(text, buffer, objNum, genNum);
-      if (content !== null && /\b(?:BT|Tj|TJ|Td)\b/.test(content)) {
+      if (content !== null && /\b(?:Tj|TJ)\b/.test(content)) {
         verifiedPages++;
         break;
       }

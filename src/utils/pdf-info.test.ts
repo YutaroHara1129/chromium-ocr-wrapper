@@ -832,10 +832,10 @@ describe("verifyPerPageText", () => {
     expect(result.verifiedPages).toBe(1);
   });
 
-  it("detects text with Td operator without BT block", () => {
+  it("does not verify page with only Td positioning operator (no text shown)", () => {
     const buf = makeContentPdf(["100 700 Td"]);
     const result = verifyPerPageText(buf);
-    expect(result.verifiedPages).toBe(1);
+    expect(result.verifiedPages).toBe(0);
   });
 
   it("resolves object with non-zero generation number", () => {
