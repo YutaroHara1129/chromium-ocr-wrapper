@@ -204,7 +204,7 @@ describe("runCli", () => {
       code: "commander.version",
     });
 
-    expect(stdoutText(writeSpy)).toContain("0.1.0-beta.0");
+    expect(stdoutText(writeSpy)).toContain("1.0.0");
   });
 
   it("single PDF input converts successfully", async () => {
