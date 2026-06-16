@@ -2,7 +2,7 @@
 
 CLI tool that converts image-only PDFs into searchable PDFs using Chrome's built-in OCR. Google Chrome ships an on-device OCR engine called Screen AI that runs automatically inside the PDF viewer when a scanned document is opened. This project wraps that capability so you can invoke it from the command line or from a Node.js program, without relying on cloud services.
 
-> **Beta software** — This package is in early development (v0.x). The API may change between minor versions. Tested on macOS; Linux and Windows support is experimental.
+> **Stable release** — This package follows [semantic versioning](https://semver.org/). The public API (CLI flags, library exports, and type definitions) is stable as of v1.0.0. Tested on macOS; Linux and Windows support is experimental.
 
 ## Requirements
 
