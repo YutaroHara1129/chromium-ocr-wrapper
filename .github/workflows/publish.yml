@@ -33,4 +33,5 @@ jobs:
 
       - run: npm run build
 
-      - run: npm publish --provenance --access public --tag latest
+      - name: Publish to npm
+        run: npm publish --provenance --access public --tag ${{ github.event.release.prerelease && 'beta' || 'latest' }}
