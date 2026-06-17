@@ -44,7 +44,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/yutarohara/chromium-ocr-wrapper.git"
+    "url": "git+https://github.com/YutaroHara1129/chromium-ocr-wrapper.git"
   },
   "publishConfig": {
     "access": "public"
